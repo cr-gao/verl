@@ -357,13 +357,14 @@ class RolloutConfig(BaseConfig):
                     "rollout.topk_log_probs requires temperature > 0, top_p=1.0 and top_k=-1 so the returned "
                     "head is the sampling distribution."
                 )
-            if self.name == "vllm":
-                vllm_kwargs = self.engine_kwargs.setdefault("vllm", {})
-                max_logprobs = vllm_kwargs.get("max_logprobs")
-                if max_logprobs is None:
-                    vllm_kwargs["max_logprobs"] = self.topk_log_probs
-                elif max_logprobs < self.topk_log_probs:
-                    raise ValueError(
-                        f"engine_kwargs.vllm.max_logprobs ({max_logprobs}) must be >= rollout.topk_log_probs "
-                        f"({self.topk_log_probs})."
-                    )
+            if self.name != "vllm":
+                raise ValueError("rollout.topk_log_probs is supported by the vLLM rollout only.")
+            vllm_kwargs = self.engine_kwargs.setdefault("vllm", {})
+            max_logprobs = vllm_kwargs.get("max_logprobs")
+            if max_logprobs is None:
+                vllm_kwargs["max_logprobs"] = self.topk_log_probs
+            elif max_logprobs < self.topk_log_probs:
+                raise ValueError(
+                    f"engine_kwargs.vllm.max_logprobs ({max_logprobs}) must be >= rollout.topk_log_probs "
+                    f"({self.topk_log_probs})."
+                )

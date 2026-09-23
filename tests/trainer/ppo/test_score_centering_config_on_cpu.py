@@ -54,6 +54,11 @@ def test_topk_log_probs_requires_calculate_log_probs_and_full_support():
         RolloutConfig(topk_log_probs=128, calculate_log_probs=True, top_k=50)
 
 
+def test_topk_log_probs_requires_vllm_rollout():
+    with pytest.raises(ValueError, match="vLLM"):
+        RolloutConfig(name="sglang", topk_log_probs=128, calculate_log_probs=True)
+
+
 def test_topk_log_probs_raises_vllm_max_logprobs():
     cfg = RolloutConfig(name="vllm", topk_log_probs=128, calculate_log_probs=True)
     assert cfg.engine_kwargs["vllm"]["max_logprobs"] == 128
