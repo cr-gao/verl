@@ -82,12 +82,19 @@ def ppo_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None)
 
     metrics = {}
 
+    # score centering needs "prompts"/"responses" from the unselected data to unpad sc_correction
+    policy_loss_kwargs = {}
+    sc_correction = model_output.get("sc_correction", None)
+    if sc_correction is not None:
+        policy_loss_kwargs["sc_correction"] = no_padding_2_padding(sc_correction, data)
+
     # select fields and convert to padded tensor
     fields = ["response_mask", "old_log_probs", "advantages"]
     if "rollout_is_weights" in data:
         fields.append("rollout_is_weights")
     if "ref_log_prob" in data:
         fields.append("ref_log_prob")
+    unselected_data = data
     data = data.select(*fields).to_padded_tensor()
 
     response_mask = data["response_mask"].to(bool)
@@ -109,6 +116,7 @@ def ppo_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None)
         loss_agg_mode=loss_agg_mode,
         config=config,
         rollout_is_weights=rollout_is_weights,
+        **policy_loss_kwargs,
     )
 
     # AggregationType.MEAN for pg metrics: assumes policy_loss_fn normalizes by local_bsz/local_tokens
@@ -117,6 +125,10 @@ def ppo_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None)
 
     metrics.update(pg_metrics)
     metrics["actor/pg_loss"] = Metric(value=pg_loss, aggregation=metric_aggregation)
+    if sc_correction is not None:
+        for key in ("sc_sampler_head_mass", "sc_train_head_mass"):
+            value = masked_mean(no_padding_2_padding(model_output[key], unselected_data), response_mask)
+            metrics[f"actor/{key}"] = Metric(value=value, aggregation=AggregationType.MEAN)
     policy_loss = pg_loss
 
     # add entropy loss
