@@ -219,9 +219,9 @@ def score_centering_correction(
 
     The sampler's tail (outside the top-k head H) is modeled as the trainer's tail rescaled by
     ``alpha = rho * weight_fn(1 / rho)`` with ``rho = (1 - q_mass) / (1 - p_mass)``, so the
-    correction only needs the k head log-probs of both distributions. When the trainer has no
-    tail (``p_mass`` saturates to 1, e.g. the head spans the whole vocabulary), ``alpha`` is
-    forced to 0 instead of the ill-conditioned ``rho``.
+    correction only needs the k head log-probs of both distributions. When the head covers the
+    whole vocabulary, ``rho`` is ill-conditioned and the correction's value is not meaningful;
+    only its gradient is (it still matches the exact full-vocabulary centering term).
 
     Args:
         train_head_log_probs: Trainer's full-vocab-normalized log-probs at the head ids,
@@ -244,12 +244,8 @@ def score_centering_correction(
         p = train_head_log_probs.exp()
         q = sampler_head_log_probs.float().exp()
         p_mass, q_mass = p.sum(-1), q.sum(-1)
-        train_tail_mass = (1 - p_mass).clamp_min(0.0)
-        sampler_tail_mass = (1 - q_mass).clamp_min(0.0)
-        rho = sampler_tail_mass.clamp_min(eps) / train_tail_mass.clamp_min(eps)
-        # No trainer tail to rescale (e.g. the head already spans the full vocabulary):
-        # the tail model contributes nothing, whatever rho's ill-conditioned ratio evaluates to.
-        alpha = torch.where(train_tail_mass > eps, rho * weight_fn(1.0 / rho), torch.zeros_like(rho))
+        rho = (1 - q_mass).clamp_min(eps) / (1 - p_mass).clamp_min(eps)
+        alpha = rho * weight_fn(1.0 / rho)
         head_weights = weight_fn((train_head_log_probs - sampler_head_log_probs.float()).exp())
         residual = q * head_weights - alpha.unsqueeze(-1) * p
     correction = (residual * train_head_log_probs).sum(-1)

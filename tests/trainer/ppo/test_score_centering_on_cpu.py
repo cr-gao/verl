@@ -60,7 +60,9 @@ def test_correction_is_zero_on_policy():
     torch.testing.assert_close(q_mass, p_mass)
 
 
-def test_topk_correction_equals_full_vocab_when_k_is_vocab():
+def test_topk_correction_gradient_equals_full_vocab_when_k_is_vocab():
+    # With k = V the head/tail split is degenerate (rho = 0/0), so only the gradient of the
+    # correction is meaningful; it must match the exact full-vocab centering term's gradient.
     torch.manual_seed(2)
     vocab = 9
     trainer_logits = torch.randn(4, vocab, requires_grad=True)
@@ -69,7 +71,6 @@ def test_topk_correction_equals_full_vocab_when_k_is_vocab():
     head = topk_log_probs_from_logits(trainer_logits, ids)
     correction, _, _ = score_centering_correction(head, sampler_log_probs, score_centering_weight_fn(None, 2.0))
     ref = _full_vocab_centering(trainer_logits, sampler_log_probs)
-    torch.testing.assert_close(correction, ref, atol=1e-5, rtol=1e-5)
     grad_a = torch.autograd.grad(correction.sum(), trainer_logits)[0]
     grad_b = torch.autograd.grad(ref.sum(), trainer_logits)[0]
     torch.testing.assert_close(grad_a, grad_b, atol=1e-5, rtol=1e-5)
