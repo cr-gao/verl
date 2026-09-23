@@ -32,6 +32,7 @@ from verl.checkpoint_engine import CheckpointEngineRegistry
 from verl.single_controller.base import Worker
 from verl.single_controller.base.decorator import Dispatch, make_nd_compute_dataproto_dispatch_fn, register
 from verl.trainer.distillation import distillation_ppo_loss, is_distillation_enabled
+from verl.trainer.ppo.score_centering import score_centering_ppo_loss
 from verl.utils import tensordict_utils as tu
 from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.device import get_device_name, get_torch_device, set_expandable_segments
@@ -72,6 +73,19 @@ def _with_routing_replay_flag(enabled: bool):
         return wrapper
 
     return decorator
+
+
+def select_actor_loss_fn(actor_config, distillation_config):
+    """Pick the actor loss function: distillation, score centering, or plain PPO."""
+    if is_distillation_enabled(distillation_config):
+        return partial(distillation_ppo_loss, config=actor_config, distillation_config=distillation_config)
+    if actor_config.policy_loss.rollout_correction.score_centering:
+        if actor_config.use_fused_kernels:
+            raise NotImplementedError("score centering needs the full logits; set actor.use_fused_kernels=False.")
+        if actor_config.strategy == "megatron":
+            raise NotImplementedError("score centering is implemented for the FSDP engine only.")
+        return partial(score_centering_ppo_loss, config=actor_config)
+    return partial(ppo_loss, config=actor_config)
 
 
 class TrainingWorker(Worker, DistProfilerExtension):
@@ -635,12 +649,9 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             else:
                 assert self.config.rollout.log_prob_micro_batch_size_per_gpu is not None
                 assert self.config.actor.ppo_micro_batch_size_per_gpu is not None
-            if self.distillation_enabled:
-                self.loss_fn = partial(
-                    distillation_ppo_loss, config=actor_config, distillation_config=distillation_config
-                )
-            else:
-                self.loss_fn = partial(ppo_loss, config=actor_config)
+            self.loss_fn = select_actor_loss_fn(
+                actor_config, distillation_config if self.distillation_enabled else None
+            )
             self.actor = self.actor_worker_cls(config=actor_training_config)
             self.actor.reset()
             self.actor.set_loss_fn(self.loss_fn)
