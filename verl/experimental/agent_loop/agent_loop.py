@@ -853,8 +853,7 @@ class AgentLoopWorker:
             )
 
         rollout_topk_ids = rollout_topk_log_probs = None
-        topk_log_probs = getattr(self.rollout_config, "topk_log_probs", 0)
-        if topk_log_probs:
+        if self.rollout_config.topk_log_probs and not validate:
             from verl.trainer.ppo.score_centering import pad_rollout_topk
 
             if "response_topk_ids" not in output.extra_fields:
@@ -862,7 +861,7 @@ class AgentLoopWorker:
             rollout_topk_ids, rollout_topk_log_probs = pad_rollout_topk(
                 output.extra_fields.pop("response_topk_ids"),
                 output.extra_fields.pop("response_topk_log_probs"),
-                k=topk_log_probs,
+                k=self.rollout_config.topk_log_probs,
                 prompt_width=prompt_output["input_ids"].shape[1],
                 response_width=response_output["input_ids"].shape[1],
                 response_length=len(output.response_ids),

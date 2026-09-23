@@ -25,9 +25,10 @@ def test_rollout_topk_survives_no_padding_roundtrip_aligned_with_responses():
     ids_rows, log_rows, attention, response_mask = [], [], [], []
     for b, (p_len, r_len) in enumerate(zip(prompt_lengths, response_lengths, strict=False)):
         heads = [[100 * b + r, 100 * b + r + 50] for r in range(r_len)]
+        log_head = [[-0.5 - r, -1.0] for r in range(r_len)]
         ids, log_probs = pad_rollout_topk(
             heads,
-            [[-0.5, -1.0]] * r_len,
+            log_head,
             k=k,
             prompt_width=prompt_width,
             response_width=response_width,
@@ -57,10 +58,12 @@ def test_rollout_topk_survives_no_padding_roundtrip_aligned_with_responses():
     )
     data = left_right_2_no_padding(batch)
     assert data["rollout_topk_ids"].is_nested and data["rollout_topk_log_probs"].is_nested
-    padded = no_padding_2_padding(data["rollout_topk_ids"], data)
-    assert padded.shape == (2, response_width, k)
+    padded_ids = no_padding_2_padding(data["rollout_topk_ids"], data)
+    padded_log_probs = no_padding_2_padding(data["rollout_topk_log_probs"], data)
+    assert padded_ids.shape == padded_log_probs.shape == (2, response_width, k)
     for b, r_len in enumerate(response_lengths):
-        assert padded[b, :r_len, 0].tolist() == [100 * b + r for r in range(r_len)]
+        assert padded_ids[b, :r_len, 0].tolist() == [100 * b + r for r in range(r_len)]
+        torch.testing.assert_close(padded_log_probs[b, :r_len, 0], torch.tensor([-0.5 - r for r in range(r_len)]))
 
 
 def test_padding_template_uses_dummy_heads():

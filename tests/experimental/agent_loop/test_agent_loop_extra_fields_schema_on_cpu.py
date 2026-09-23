@@ -362,7 +362,7 @@ async def test_agent_loop_postprocess_accepts_read_only_routed_experts_on_cpu():
 
         def __init__(self):
             self.tokenizer = _FakeTokenizer()
-            self.rollout_config = OmegaConf.create({"prompt_length": 4, "response_length": 4})
+            self.rollout_config = OmegaConf.create({"prompt_length": 4, "response_length": 4, "topk_log_probs": 0})
             self.processor = None
             self.mm_processor_kwargs = {}
             self.reward_loop_worker_handles = None
@@ -402,6 +402,45 @@ async def test_agent_loop_postprocess_accepts_read_only_routed_experts_on_cpu():
     torch.testing.assert_close(internal.routed_experts[:, 2:6], expected)
     assert torch.count_nonzero(internal.routed_experts[:, :2]) == 0
     assert torch.count_nonzero(internal.routed_experts[:, 6:]) == 0
+
+
+@pytest.mark.asyncio
+async def test_agent_loop_postprocess_skips_rollout_topk_on_validate_on_cpu():
+    class _DummyWorker:
+        _compute_multi_modal_inputs = AgentLoopWorker._compute_multi_modal_inputs
+        _compute_position_ids = AgentLoopWorker._compute_position_ids
+        _get_mm_processor_kwargs = AgentLoopWorker._get_mm_processor_kwargs
+        _compute_score = AgentLoopWorker._compute_score
+        _compute_teacher_logprobs = AgentLoopWorker._compute_teacher_logprobs
+        _pad_token_ids = AgentLoopWorker._pad_token_ids
+        distillation_enabled = False
+
+        def __init__(self):
+            self.tokenizer = _FakeTokenizer()
+            self.rollout_config = OmegaConf.create({"prompt_length": 4, "response_length": 4, "topk_log_probs": 128})
+            self.processor = None
+            self.mm_processor_kwargs = {}
+            self.reward_loop_worker_handles = None
+
+    output = AgentLoopOutput(
+        prompt_ids=[101, 102],
+        response_ids=[11, 12],
+        response_mask=[1, 1],
+        metrics=AgentLoopMetrics(),
+        extra_fields={},
+    )
+
+    # Validation rollouts request no sampler head (generate_sequences sets topk_log_probs=0),
+    # so postprocess must not look for it even though the config still has topk_log_probs > 0.
+    internal = await AgentLoopWorker._agent_loop_postprocess(
+        _DummyWorker(),
+        output,
+        validate=True,
+        raw_prompt=[{"role": "user", "content": "hi"}],
+    )
+
+    assert internal.rollout_topk_ids is None
+    assert internal.rollout_topk_log_probs is None
 
 
 class _FakeTokenizerCustomPad:
