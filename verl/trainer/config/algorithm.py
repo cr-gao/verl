@@ -139,9 +139,10 @@ class RolloutCorrectionConfig(BaseConfig):
             Default: "ppo_clip"
 
         score_centering (bool): Subtract the expected score under the sampler from every token's
-            score (arXiv 2609.20807). Needs the sampler's top-k log-probs from the rollout
-            (``actor_rollout_ref.rollout.topk_log_probs``). Only with ``bypass_mode=True``,
-            ``loss_type="reinforce"`` and ``rollout_is`` None or "token". Default: False
+            score, see the score centering reference below. Needs the sampler's top-k log-probs
+            from the rollout (``actor_rollout_ref.rollout.topk_log_probs``). Only with
+            ``bypass_mode=True``, ``loss_type="reinforce"`` and ``rollout_is`` None or "token".
+            Default: False
 
     Example:
         # Create with defaults
@@ -183,6 +184,10 @@ class RolloutCorrectionConfig(BaseConfig):
         Liu, Li, Fu, Wang, Liu, Shen (2025)
         "When Speed Kills Stability: Demystifying RL Collapse from the Training-Inference Mismatch"
         https://richardli.xyz/rl-collapse
+
+        Marek, Ryabinin (2026)
+        "Score Centering Stabilizes Off-policy Reinforcement Learning"
+        https://arxiv.org/abs/2609.20807
     """
 
     rollout_is: Optional[str] = "sequence"
