@@ -296,9 +296,9 @@ Subtract the expected score under the sampler from every token's score
 
 - `True`: Removes the training-inference drift term exactly; a no-op on-policy
 - Requires `bypass_mode=True` and `loss_type="reinforce"` (raises `ValueError` otherwise)
-- Requires `rollout_is` to be `None` or `"token"` (raises `ValueError` for `"sequence"`)
+- Requires `rollout_is` to be `None` or `"token"` (raises `ValueError` for `"sequence"`) and `rollout_is_batch_normalize=False`
 - Requires `actor_rollout_ref.rollout.topk_log_probs > 0` (sampler top-k log-probs, vLLM only)
-- FSDP actor only; incompatible with `use_fused_kernels`; single-turn agent loop only
+- FSDP actor only; incompatible with `use_fused_kernels` and distillation; single-turn agent loop only; legacy trainer only (`trainer.use_v1=False`)
 
 ## Understanding the Framework: Components and Combinations
 
@@ -617,7 +617,7 @@ algorithm:
   mismatch exactly, with no extra hyperparameters
 - A no-op on-policy (π_θ = π_rollout)
 - Composes with token-level TIS / IcePop by centering the already-weighted score
-- Stable under sampler quantization
+- Reported by the paper to be stable under sampler quantization
 - The trainer only evaluates the sampler's top-`k` head log-probs per token; the tail is modeled as
   the trainer's tail rescaled to the sampler's tail mass
 
@@ -627,11 +627,26 @@ algorithm:
 
 - Set `actor_rollout_ref.rollout.calculate_log_probs: true` and `actor_rollout_ref.rollout.topk_log_probs: 128` (vLLM rollout only; `k=128` matches the paper, `k=32` also matches)
 - Set `actor_rollout_ref.rollout.temperature` > 0, `actor_rollout_ref.rollout.top_p: 1.0`, `actor_rollout_ref.rollout.top_k: -1`
-- Set `actor_rollout_ref.actor.policy_loss.loss_mode: bypass_mode`
-- Set rollout correction config via `actor_rollout_ref.actor.policy_loss.rollout_correction`, mirroring `bypass_mode`, `loss_type`, `rollout_is`, `rollout_is_threshold`, `score_centering` from `algorithm.rollout_correction`
+- Set `actor_rollout_ref.actor.policy_loss.loss_mode: bypass_mode` and mirror `bypass_mode`, `loss_type`, `rollout_is`, `rollout_is_threshold`, `score_centering` from `algorithm.rollout_correction` into `actor_rollout_ref.actor.policy_loss.rollout_correction`:
+
+  ```yaml
+  actor_rollout_ref:
+    actor:
+      policy_loss:
+        loss_mode: bypass_mode
+        rollout_correction:
+          bypass_mode: true
+          loss_type: reinforce
+          rollout_is: token
+          rollout_is_threshold: 2.0
+          score_centering: true
+  ```
+
 - Set `actor_rollout_ref.actor.use_fused_kernels: false` (incompatible with fused kernels)
+- Set `trainer.use_v1: false` (the v1 trainer is not supported)
 - FSDP actor only; single-turn agent loop only
-- Memory: `8k` bytes per response token on the driver (`k=128`: 1 KB/token)
+- Memory: `8k` bytes per padded prompt+response position on the driver (`k=128`: 1 KB per position)
+- The trainer evaluates the head log-probs in chunks of 4096 positions, with an fp32 workspace of roughly `4096 × vocab × 4` bytes
 - Metrics: `actor/sc_correction`, `actor/sc_sampler_head_mass`, `actor/sc_train_head_mass`
 
 ---
