@@ -25,6 +25,7 @@ from tensordict import TensorDict
 from verl.trainer.config.algorithm import RolloutCorrectionConfig
 from verl.trainer.ppo.score_centering import score_centering_ppo_loss
 from verl.utils import tensordict_utils as tu
+from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.dataset.dataset_utils import DatasetPadMode
 from verl.workers.config import ActorConfig, PolicyLossConfig
 from verl.workers.engine.fsdp.transformer_impl import FSDPEngineWithLMHead
@@ -45,6 +46,26 @@ def test_select_actor_loss_fn_picks_score_centering():
 
     fn = select_actor_loss_fn(_actor_config(), distillation_config=None)
     assert fn.func is ppo_loss
+
+
+def test_select_actor_loss_fn_reads_mapping_rollout_correction():
+    # `+` overrides add the actor-side rollout_correction without a `_target_`, so it stays a dict.
+    config = omega_conf_to_dataclass(
+        {
+            "_target_": "verl.workers.config.ActorConfig",
+            "strategy": "fsdp",
+            "rollout_n": 1,
+            "ppo_micro_batch_size_per_gpu": 1,
+            "policy_loss": {
+                "_target_": "verl.workers.config.PolicyLossConfig",
+                "loss_mode": "bypass_mode",
+                "rollout_correction": {"bypass_mode": True, "loss_type": "reinforce", "score_centering": True},
+            },
+        }
+    )
+    assert isinstance(config.policy_loss.rollout_correction, dict)
+    fn = select_actor_loss_fn(config, distillation_config=None)
+    assert isinstance(fn, partial) and fn.func is score_centering_ppo_loss
 
 
 def test_select_actor_loss_fn_rejects_fused_kernels_for_score_centering():

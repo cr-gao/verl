@@ -101,6 +101,29 @@ def test_logits_processor_returns_per_token_scalars():
     assert (out["sc_sampler_head_mass"] <= 1.0 + 1e-6).all()
 
 
+@pytest.mark.parametrize(
+    "preset, rollout_correction",
+    [
+        (RolloutCorrectionConfig.bypass_pg_sc(), {"bypass_mode": True, "loss_type": "reinforce"}),
+        (
+            RolloutCorrectionConfig.bypass_pg_token_icepop_sc(),
+            {"bypass_mode": True, "loss_type": "reinforce", "rollout_is": "token", "rollout_is_threshold": "0.5_5.0"},
+        ),
+    ],
+)
+def test_logits_processor_reads_mapping_rollout_correction(preset, rollout_correction):
+    torch.manual_seed(4)
+    lengths, k, vocab = [3, 5], 4, 17
+    data = _nested_batch(lengths, k, vocab)
+    logits = torch.randn(1, sum(lengths), vocab)
+    expected = score_centering_logits_processor(student_logits=logits, data=data, config=_actor_config(preset))
+    out = score_centering_logits_processor(
+        student_logits=logits, data=data, config=_actor_config({**rollout_correction, "score_centering": True})
+    )
+    for key in expected:
+        torch.testing.assert_close(out[key], expected[key])
+
+
 def test_score_centering_ppo_loss_routes_hook_and_final_loss(monkeypatch):
     config = _actor_config(RolloutCorrectionConfig.bypass_pg_sc())
     called = {}

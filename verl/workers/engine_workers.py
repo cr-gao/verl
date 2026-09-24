@@ -77,7 +77,8 @@ def _with_routing_replay_flag(enabled: bool):
 
 def select_actor_loss_fn(actor_config, distillation_config):
     """Pick the actor loss function: distillation, score centering, or plain PPO."""
-    score_centering = actor_config.policy_loss.rollout_correction.score_centering
+    rollout_correction = actor_config.policy_loss.get("rollout_correction", None) or {}
+    score_centering = rollout_correction.get("score_centering", False)
     if is_distillation_enabled(distillation_config):
         if score_centering:
             raise ValueError("score centering cannot be combined with distillation.")

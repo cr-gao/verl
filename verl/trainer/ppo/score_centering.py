@@ -288,7 +288,9 @@ def score_centering_logits_processor(
         student_logits.shape,
     )
     rollout_correction = config.policy_loss.rollout_correction
-    weight_fn = score_centering_weight_fn(rollout_correction.rollout_is, rollout_correction.rollout_is_threshold)
+    weight_fn = score_centering_weight_fn(
+        rollout_correction.get("rollout_is", None), rollout_correction.get("rollout_is_threshold", 2.0)
+    )
     train_head_log_probs = topk_log_probs_from_logits(student_logits.squeeze(0), topk_ids.squeeze(0))
     correction, sampler_head_mass, train_head_mass = score_centering_correction(
         train_head_log_probs, topk_log_probs.squeeze(0), weight_fn
