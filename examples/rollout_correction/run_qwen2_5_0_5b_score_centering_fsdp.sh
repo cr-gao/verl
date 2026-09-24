@@ -106,7 +106,6 @@ ROLLOUT=(
 )
 
 TRAINER=(
-    trainer.use_v1=False
     trainer.logger='["console","wandb"]'
     trainer.project_name="rollout_corr_score_centering_example"
     trainer.experiment_name="qwen2_5_0_5b_token_tis_sc"

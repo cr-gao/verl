@@ -298,7 +298,7 @@ Subtract the expected score under the sampler from every token's score
 - Requires `bypass_mode=True` and `loss_type="reinforce"` (raises `ValueError` otherwise)
 - Requires `rollout_is` to be `None` or `"token"` (raises `ValueError` for `"sequence"`) and `rollout_is_batch_normalize=False`
 - Requires `actor_rollout_ref.rollout.topk_log_probs > 0` (sampler top-k log-probs, vLLM only)
-- FSDP actor only; incompatible with `use_fused_kernels` and distillation; single-turn agent loop only; legacy trainer only (`trainer.use_v1=False`)
+- FSDP actor only; incompatible with `use_fused_kernels` and distillation; single-turn agent loop only
 
 ## Understanding the Framework: Components and Combinations
 
@@ -643,7 +643,6 @@ algorithm:
   ```
 
 - Set `actor_rollout_ref.actor.use_fused_kernels: false` (incompatible with fused kernels)
-- Set `trainer.use_v1: false` (the v1 trainer is not supported)
 - FSDP actor only; single-turn agent loop only
 - Memory: `8k` bytes per padded prompt+response position on the driver (`k=128`: 1 KB per position)
 - The trainer evaluates the head log-probs in chunks of 4096 positions, with an fp32 workspace of roughly `4096 × vocab × 4` bytes

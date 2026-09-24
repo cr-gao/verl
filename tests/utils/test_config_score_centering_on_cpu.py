@@ -18,7 +18,7 @@ from omegaconf import OmegaConf
 from verl.utils.config import _validate_score_centering_config
 
 
-def _config(algorithm_sc=True, actor_sc=True, loss_mode="bypass_mode", topk_log_probs=128, use_v1=False):
+def _config(algorithm_sc=True, actor_sc=True, loss_mode="bypass_mode", topk_log_probs=128, use_v1=True):
     policy_loss = {"loss_mode": loss_mode}
     if actor_sc is not None:
         policy_loss["rollout_correction"] = {"score_centering": actor_sc}
@@ -61,6 +61,14 @@ def test_score_centering_requires_rollout_topk_log_probs():
         _validate_score_centering_config(_config(topk_log_probs=0))
 
 
-def test_score_centering_rejects_v1_trainer():
-    with pytest.raises(ValueError, match="trainer.use_v1"):
-        _validate_score_centering_config(_config(use_v1=True))
+@pytest.mark.parametrize("use_v1", [True, False])
+def test_score_centering_accepts_both_trainers(use_v1):
+    _validate_score_centering_config(_config(use_v1=use_v1))
+
+
+def test_score_centering_tolerates_null_rollout_correction():
+    config = _config(actor_sc=None)
+    config.algorithm.rollout_correction = None
+    config.actor_rollout_ref.actor.policy_loss.rollout_correction = None
+
+    _validate_score_centering_config(config)

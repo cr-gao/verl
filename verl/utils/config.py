@@ -86,13 +86,11 @@ def _validate_router_replay_config(actor_config: Any, rollout_correction: Any) -
 
 
 def _validate_score_centering_config(config: DictConfig) -> None:
-    algorithm_sc = config.algorithm.get("rollout_correction", {}).get("score_centering", False)
+    algorithm_sc = (config.algorithm.get("rollout_correction") or {}).get("score_centering", False)
     policy_loss = config.actor_rollout_ref.actor.policy_loss
-    actor_sc = policy_loss.get("rollout_correction", {}).get("score_centering", False)
+    actor_sc = (policy_loss.get("rollout_correction") or {}).get("score_centering", False)
     if not (algorithm_sc or actor_sc):
         return
-    if config.trainer.get("use_v1", False):
-        raise ValueError("score centering is not supported by the v1 trainer; set trainer.use_v1=False.")
     if not (algorithm_sc and actor_sc):
         raise ValueError(
             "score centering must be enabled on both algorithm.rollout_correction.score_centering and "

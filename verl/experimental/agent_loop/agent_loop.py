@@ -158,6 +158,26 @@ class AgentLoopOutput(BaseModel):
             output["teacher_ids"] = teacher_ids
         if teacher_logprobs is not None:
             output["teacher_logprobs"] = teacher_logprobs
+        response_topk_ids, response_topk_log_probs = (
+            extra_fields.pop("response_topk_ids", None),
+            extra_fields.pop("response_topk_log_probs", None),
+        )
+        if response_topk_ids is not None and response_topk_log_probs is not None:
+            from verl.trainer.ppo.score_centering import pad_rollout_topk
+
+            if self.num_turns > 2:
+                raise ValueError("rollout.topk_log_probs supports the single-turn agent loop only.")
+            prompt_length, response_length = output["prompts"].size(0), output["responses"].size(0)
+            rollout_topk_ids, rollout_topk_log_probs = pad_rollout_topk(
+                response_topk_ids,
+                response_topk_log_probs,
+                k=len(response_topk_ids[0]),
+                prompt_width=prompt_length,
+                response_width=response_length,
+                response_length=response_length,
+            )
+            output["rollout_topk_ids"] = rollout_topk_ids.squeeze(0)
+            output["rollout_topk_log_probs"] = rollout_topk_log_probs.squeeze(0)
         return output
 
 
