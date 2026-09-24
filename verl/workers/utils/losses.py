@@ -60,6 +60,11 @@ def ppo_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None)
     entropy = model_output.get("entropy", None)
     if entropy is not None:
         entropy = no_padding_2_padding(entropy, data)
+    sc_outputs = {
+        key: no_padding_2_padding(model_output[key], data)
+        for key in ("sc_correction", "sc_sampler_head_mass", "sc_train_head_mass")
+        if key in model_output
+    }
 
     # global batch info for loss aggregation
     config.global_batch_info["dp_size"] = data["dp_size"]
@@ -82,19 +87,12 @@ def ppo_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None)
 
     metrics = {}
 
-    # score centering needs "prompts"/"responses" from the unselected data to unpad sc_correction
-    policy_loss_kwargs = {}
-    sc_correction = model_output.get("sc_correction", None)
-    if sc_correction is not None:
-        policy_loss_kwargs["sc_correction"] = no_padding_2_padding(sc_correction, data)
-
     # select fields and convert to padded tensor
     fields = ["response_mask", "old_log_probs", "advantages"]
     if "rollout_is_weights" in data:
         fields.append("rollout_is_weights")
     if "ref_log_prob" in data:
         fields.append("ref_log_prob")
-    unselected_data = data
     data = data.select(*fields).to_padded_tensor()
 
     response_mask = data["response_mask"].to(bool)
@@ -108,6 +106,7 @@ def ppo_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None)
     loss_mode = config.policy_loss.get("loss_mode", "vanilla")
 
     policy_loss_fn = get_policy_loss_fn(loss_mode)
+    policy_loss_kwargs = {"sc_correction": sc_outputs["sc_correction"]} if sc_outputs else {}
     pg_loss, pg_metrics = policy_loss_fn(
         old_log_prob=old_log_prob,
         log_prob=log_prob,
@@ -125,9 +124,9 @@ def ppo_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None)
 
     metrics.update(pg_metrics)
     metrics["actor/pg_loss"] = Metric(value=pg_loss, aggregation=metric_aggregation)
-    if sc_correction is not None:
+    if sc_outputs:
         for key in ("sc_sampler_head_mass", "sc_train_head_mass"):
-            value = masked_mean(no_padding_2_padding(model_output[key], unselected_data), response_mask)
+            value = masked_mean(sc_outputs[key], response_mask)
             metrics[f"actor/{key}"] = Metric(value=value, aggregation=AggregationType.MEAN)
     policy_loss = pg_loss
 

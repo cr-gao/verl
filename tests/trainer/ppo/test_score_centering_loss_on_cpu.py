@@ -23,7 +23,10 @@ from tensordict import TensorDict
 from verl.trainer.config.algorithm import RolloutCorrectionConfig
 from verl.trainer.ppo.core_algos import compute_policy_loss_bypass_mode, compute_policy_loss_reinforce
 from verl.trainer.ppo.score_centering import score_centering_logits_processor, score_centering_ppo_loss
+from verl.utils import tensordict_utils as tu
 from verl.workers.config import ActorConfig, PolicyLossConfig
+from verl.workers.utils.losses import ppo_loss
+from verl.workers.utils.padding import left_right_2_no_padding
 
 
 def _actor_config(rollout_correction):
@@ -112,3 +115,56 @@ def test_score_centering_ppo_loss_routes_hook_and_final_loss(monkeypatch):
     assert "sc_correction" in out
     score_centering_ppo_loss(config, model_output={}, data=data)
     assert called["ppo"]
+
+
+def test_ppo_loss_applies_score_centering_end_to_end():
+    torch.manual_seed(3)
+    prompts = torch.tensor([[0, 5, 6], [7, 8, 9]])
+    responses = torch.tensor([[11, 12, 0], [13, 14, 15]])
+    attention_mask = torch.tensor([[0, 1, 1, 1, 1, 0], [1, 1, 1, 1, 1, 1]])
+    response_mask = attention_mask[:, 3:]
+    advantages = torch.randn(2, 3)
+    data = TensorDict(
+        {
+            "prompts": prompts,
+            "responses": responses,
+            "input_ids": torch.cat([prompts, responses], dim=1),
+            "attention_mask": attention_mask,
+            "response_mask": response_mask,
+            "position_ids": (attention_mask.cumsum(-1) - 1).clamp_min(0),
+            "old_log_probs": -torch.rand(2, 3),
+            "advantages": advantages,
+        },
+        batch_size=[2],
+    )
+    tu.assign_non_tensor(data, dp_size=1, batch_num_tokens=int(response_mask.sum()), global_batch_size=2)
+    data = left_right_2_no_padding(data)
+
+    prompt_lens, response_lens = [2, 3], [2, 3]
+    full = {
+        "log_probs": [-torch.rand(4), -torch.rand(6)],
+        "sc_correction": [torch.randn(4), torch.randn(6)],
+        "sc_sampler_head_mass": [torch.rand(4), torch.rand(6)],
+        "sc_train_head_mass": [torch.rand(4), torch.rand(6)],
+    }
+    model_output = {key: torch.nested.as_nested_tensor(rows, layout=torch.jagged) for key, rows in full.items()}
+
+    def response_part(rows):
+        # response token r is predicted by sequence position prompt_len - 1 + r
+        return torch.stack(
+            [
+                torch.nn.functional.pad(row[p - 1 : p - 1 + r], (0, 3 - r))
+                for row, p, r in zip(rows, prompt_lens, response_lens, strict=True)
+            ]
+        )
+
+    config = _actor_config(RolloutCorrectionConfig.bypass_pg_sc())
+    loss, metrics = ppo_loss(config, model_output, data)
+
+    mask = response_mask.bool()
+    log_prob, correction = response_part(full["log_probs"]), response_part(full["sc_correction"])
+    expected = (-advantages * log_prob + advantages * correction)[mask].mean()
+    torch.testing.assert_close(loss, expected)
+    for key in ("sc_correction", "sc_sampler_head_mass", "sc_train_head_mass"):
+        expected_metric = response_part(full[key])[mask].mean().item()
+        assert math.isclose(metrics[f"actor/{key}"].aggregate(), expected_metric, rel_tol=1e-5)

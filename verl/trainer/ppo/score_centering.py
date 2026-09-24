@@ -30,7 +30,6 @@ from verl.utils.ulysses import get_ulysses_sequence_parallel_world_size, slice_i
 from verl.workers.config import ActorConfig
 from verl.workers.utils.losses import ppo_loss
 
-ROLLOUT_TOPK_FIELDS = ("rollout_topk_ids", "rollout_topk_log_probs")
 TOPK_LOG_PROB_CHUNK_SIZE = 4096
 
 
