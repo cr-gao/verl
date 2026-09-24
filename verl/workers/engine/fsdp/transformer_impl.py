@@ -1430,9 +1430,8 @@ class FSDPEngineWithLMHead(FSDPEngine):
 
                 if not distillation_only:
                     # if use_sp: ((total_nnz / sp) + pad) ; if not use_sp: (batch, seqlen)
-                    inplace_backward = True
-                    if calculate_entropy:
-                        inplace_backward = False
+                    # entropy and the score centering hook reuse the logits in their backward
+                    inplace_backward = not (calculate_entropy or score_centering)
                     log_probs = logprobs_from_logits(
                         logits=logits_rmpad,
                         labels=input_ids_rmpad_rolled,
@@ -1527,7 +1526,11 @@ class FSDPEngineWithLMHead(FSDPEngine):
 
                     log_probs = None
                     if not distillation_only:
-                        log_probs = logprobs_from_logits(logits=logits_rmpad, labels=input_ids_rmpad_rolled)
+                        log_probs = logprobs_from_logits(
+                            logits=logits_rmpad,
+                            labels=input_ids_rmpad_rolled,
+                            inplace_backward=not score_centering,
+                        )
 
                     # (bsz, j1), for each sample, length of each sample: [real_prompt_length + real_response_length]
                     if not distillation_only:

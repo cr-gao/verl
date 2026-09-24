@@ -12,15 +12,21 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""CPU coverage for the actor loss-fn selection: distillation, score centering, and plain PPO."""
+"""CPU coverage for score centering's worker wiring: the actor loss-fn selection and the FSDP engine outputs."""
 
 from functools import partial
+from unittest.mock import patch
 
 import pytest
+import torch
+from tensordict import TensorDict
 
 from verl.trainer.config.algorithm import RolloutCorrectionConfig
 from verl.trainer.ppo.score_centering import score_centering_ppo_loss
+from verl.utils import tensordict_utils as tu
+from verl.utils.dataset.dataset_utils import DatasetPadMode
 from verl.workers.config import ActorConfig, PolicyLossConfig
+from verl.workers.engine.fsdp.transformer_impl import FSDPEngineWithLMHead
 from verl.workers.engine_workers import select_actor_loss_fn
 from verl.workers.utils.losses import ppo_loss
 
@@ -62,3 +68,42 @@ def test_select_actor_loss_fn_rejects_megatron_for_score_centering():
     )
     with pytest.raises(NotImplementedError):
         select_actor_loss_fn(config, distillation_config=None)
+
+
+@pytest.mark.parametrize("use_remove_padding", [True, False])
+@pytest.mark.parametrize("score_centering", [True, False])
+def test_prepare_model_outputs_keeps_logits_intact_for_score_centering(use_remove_padding, score_centering):
+    """The score centering hook saves the logits and re-reads them in its backward, so the engine
+    must not run the flash-attn cross-entropy backward that writes the gradient into the logits."""
+    seq_lengths = torch.tensor([3, 2])
+    total_nnz, vocab_size = int(seq_lengths.sum()), 8
+    cu_seqlens = torch.cat([torch.tensor([0]), seq_lengths.cumsum(0)])
+    input_ids = torch.nested.nested_tensor_from_jagged(torch.randint(0, vocab_size, (total_nnz,)), offsets=cu_seqlens)
+    output = type("Output", (), {})()
+    output_args = {"input_ids_rmpad_rolled": torch.randint(0, vocab_size, (total_nnz,))}
+    if use_remove_padding:
+        output.logits = torch.randn(1, total_nnz, vocab_size)
+        output_args.update(temperature_rmpad=torch.ones(total_nnz), pad_size=0)
+    else:
+        output.logits = torch.randn(2, 3, vocab_size)
+        output_args["temperature"] = torch.ones(2)
+
+    micro_batch = TensorDict({"input_ids": input_ids}, batch_size=[])
+    tu.assign_non_tensor(
+        micro_batch,
+        use_remove_padding=use_remove_padding,
+        pad_mode=DatasetPadMode.NO_PADDING,
+        score_centering=score_centering,
+    )
+    engine = object.__new__(FSDPEngineWithLMHead)
+    engine.use_ulysses_sp = False
+
+    def logits_processor(student_logits, data):
+        return {"sc_correction": torch.zeros(student_logits.shape[:2])}
+
+    with patch(
+        "verl.workers.engine.fsdp.transformer_impl.logprobs_from_logits", return_value=torch.zeros(total_nnz)
+    ) as mock_logprobs:
+        FSDPEngineWithLMHead.prepare_model_outputs(engine, output, output_args, micro_batch, logits_processor)
+
+    assert mock_logprobs.call_args.kwargs.get("inplace_backward", True) is not score_centering
