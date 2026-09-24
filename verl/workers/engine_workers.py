@@ -75,23 +75,6 @@ def _with_routing_replay_flag(enabled: bool):
     return decorator
 
 
-def select_actor_loss_fn(actor_config, distillation_config):
-    """Pick the actor loss function: distillation, score centering, or plain PPO."""
-    rollout_correction = actor_config.policy_loss.get("rollout_correction", None) or {}
-    score_centering = rollout_correction.get("score_centering", False)
-    if is_distillation_enabled(distillation_config):
-        if score_centering:
-            raise ValueError("score centering cannot be combined with distillation.")
-        return partial(distillation_ppo_loss, config=actor_config, distillation_config=distillation_config)
-    if score_centering:
-        if actor_config.use_fused_kernels:
-            raise NotImplementedError("score centering needs the full logits; set actor.use_fused_kernels=False.")
-        if actor_config.strategy not in ("fsdp", "fsdp2"):
-            raise NotImplementedError("score centering is implemented for the FSDP engine only.")
-        return partial(score_centering_ppo_loss, config=actor_config)
-    return partial(ppo_loss, config=actor_config)
-
-
 class TrainingWorker(Worker, DistProfilerExtension):
     """
     TrainingWorker provides a Tinker-like API (https://thinkingmachines.ai/tinker/) as a RayWorkerGroup
@@ -653,9 +636,14 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             else:
                 assert self.config.rollout.log_prob_micro_batch_size_per_gpu is not None
                 assert self.config.actor.ppo_micro_batch_size_per_gpu is not None
-            self.loss_fn = select_actor_loss_fn(
-                actor_config, distillation_config if self.distillation_enabled else None
-            )
+            if self.distillation_enabled:
+                self.loss_fn = partial(
+                    distillation_ppo_loss, config=actor_config, distillation_config=distillation_config
+                )
+            elif (actor_config.policy_loss.get("rollout_correction", None) or {}).get("score_centering", False):
+                self.loss_fn = partial(score_centering_ppo_loss, config=actor_config)
+            else:
+                self.loss_fn = partial(ppo_loss, config=actor_config)
             self.actor = self.actor_worker_cls(config=actor_training_config)
             self.actor.reset()
             self.actor.set_loss_fn(self.loss_fn)

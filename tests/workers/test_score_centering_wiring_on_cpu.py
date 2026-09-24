@@ -12,44 +12,23 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""CPU coverage for score centering's worker wiring: the actor loss-fn selection and the FSDP engine outputs."""
+"""CPU coverage for score centering's worker wiring: the actor-side config reading and the FSDP engine outputs."""
 
-from functools import partial
-from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
 import torch
 from tensordict import TensorDict
 
-from verl.trainer.config.algorithm import RolloutCorrectionConfig
-from verl.trainer.ppo.score_centering import score_centering_ppo_loss
 from verl.utils import tensordict_utils as tu
 from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.dataset.dataset_utils import DatasetPadMode
-from verl.workers.config import ActorConfig, PolicyLossConfig
 from verl.workers.engine.fsdp.transformer_impl import FSDPEngineWithLMHead
-from verl.workers.engine_workers import select_actor_loss_fn
-from verl.workers.utils.losses import ppo_loss
 
 
-def _actor_config(**kwargs):
-    return ActorConfig(strategy="fsdp", rollout_n=1, ppo_micro_batch_size_per_gpu=1, **kwargs)
-
-
-def test_select_actor_loss_fn_picks_score_centering():
-    config = _actor_config(
-        policy_loss=PolicyLossConfig(loss_mode="bypass_mode", rollout_correction=RolloutCorrectionConfig.bypass_pg_sc())
-    )
-    fn = select_actor_loss_fn(config, distillation_config=None)
-    assert isinstance(fn, partial) and fn.func is score_centering_ppo_loss
-
-    fn = select_actor_loss_fn(_actor_config(), distillation_config=None)
-    assert fn.func is ppo_loss
-
-
-def test_select_actor_loss_fn_reads_mapping_rollout_correction():
-    # `+` overrides add the actor-side rollout_correction without a `_target_`, so it stays a dict.
+def test_actor_config_reads_mapping_rollout_correction():
+    # `+` overrides add the actor-side rollout_correction without a `_target_`, so it stays a dict and
+    # the worker must read the flag through the mapping interface, as init_model does.
     config = omega_conf_to_dataclass(
         {
             "_target_": "verl.workers.config.ActorConfig",
@@ -64,41 +43,7 @@ def test_select_actor_loss_fn_reads_mapping_rollout_correction():
         }
     )
     assert isinstance(config.policy_loss.rollout_correction, dict)
-    fn = select_actor_loss_fn(config, distillation_config=None)
-    assert isinstance(fn, partial) and fn.func is score_centering_ppo_loss
-
-
-def test_select_actor_loss_fn_rejects_fused_kernels_for_score_centering():
-    config = _actor_config(
-        use_fused_kernels=True,
-        policy_loss=PolicyLossConfig(
-            loss_mode="bypass_mode", rollout_correction=RolloutCorrectionConfig.bypass_pg_sc()
-        ),
-    )
-    with pytest.raises(NotImplementedError):
-        select_actor_loss_fn(config, distillation_config=None)
-
-
-@pytest.mark.parametrize("strategy", ["megatron", "veomni"])
-def test_select_actor_loss_fn_rejects_non_fsdp_for_score_centering(strategy):
-    config = ActorConfig(
-        strategy=strategy,
-        rollout_n=1,
-        ppo_micro_batch_size_per_gpu=1,
-        policy_loss=PolicyLossConfig(
-            loss_mode="bypass_mode", rollout_correction=RolloutCorrectionConfig.bypass_pg_sc()
-        ),
-    )
-    with pytest.raises(NotImplementedError, match="FSDP engine only"):
-        select_actor_loss_fn(config, distillation_config=None)
-
-
-def test_select_actor_loss_fn_rejects_distillation_with_score_centering():
-    config = _actor_config(
-        policy_loss=PolicyLossConfig(loss_mode="bypass_mode", rollout_correction=RolloutCorrectionConfig.bypass_pg_sc())
-    )
-    with pytest.raises(ValueError, match="distillation"):
-        select_actor_loss_fn(config, distillation_config=SimpleNamespace(enabled=True))
+    assert (config.policy_loss.get("rollout_correction", None) or {}).get("score_centering", False)
 
 
 @pytest.mark.parametrize("use_remove_padding", [True, False])

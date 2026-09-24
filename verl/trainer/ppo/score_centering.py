@@ -22,7 +22,6 @@ from collections.abc import Callable
 from typing import Optional
 
 import torch
-import torch.distributed as dist
 from tensordict import TensorDict
 
 from verl.trainer.ppo.rollout_corr_helper import _parse_rollout_is_threshold
@@ -98,23 +97,16 @@ def pad_rollout_topk(
     return full_ids.unsqueeze(0), full_log_probs.unsqueeze(0)
 
 
-def _maybe_all_reduce(tensor: torch.Tensor, op, process_group) -> None:
-    if process_group is not None and dist.is_initialized():
-        dist.all_reduce(tensor, op=op, group=process_group)
-
-
 class _TopKLogProbsFromLogits(torch.autograd.Function):
     """log_softmax(logits).gather(ids) with a bounded fp32 workspace in forward and backward.
 
     Only the original logits, the ids and two scalars per row are saved; the softmax is
-    recomputed per chunk in backward. The vocab axis may be sharded across process_group.
+    recomputed per chunk in backward.
     """
 
     @staticmethod
-    def forward(ctx, logits, token_ids, process_group, chunk_size):
-        n, vocab_size = logits.shape
-        rank = dist.get_rank(process_group) if process_group is not None and dist.is_initialized() else 0
-        vocab_start = rank * vocab_size
+    def forward(ctx, logits, token_ids, chunk_size):
+        n = logits.shape[0]
         chunk_size = chunk_size if chunk_size > 0 else max(n, 1)
         output = torch.empty(token_ids.shape, device=logits.device, dtype=torch.float32)
         maxima = torch.empty((n, 1), device=logits.device, dtype=torch.float32)
@@ -123,29 +115,22 @@ class _TopKLogProbsFromLogits(torch.autograd.Function):
             end = min(start + chunk_size, n)
             work = logits[start:end].to(dtype=torch.float32, copy=True)
             maximum = work.max(dim=-1, keepdim=True).values
-            _maybe_all_reduce(maximum, dist.ReduceOp.MAX, process_group)
-            ids = token_ids[start:end]
-            local_mask = (ids >= vocab_start) & (ids < vocab_start + vocab_size)
-            local_ids = (ids - vocab_start).clamp(0, vocab_size - 1)
-            targets = work.gather(-1, local_ids).masked_fill_(~local_mask, 0.0)
-            _maybe_all_reduce(targets, dist.ReduceOp.SUM, process_group)
+            targets = work.gather(-1, token_ids[start:end])
             work.sub_(maximum).exp_()
             denominator = work.sum(dim=-1, keepdim=True)
-            _maybe_all_reduce(denominator, dist.ReduceOp.SUM, process_group)
             output[start:end] = (targets - maximum) - denominator.log()
             maxima[start:end] = maximum
             denominators[start:end] = denominator
             del work
         ctx.save_for_backward(logits, token_ids, maxima, denominators)
         ctx.chunk_size = chunk_size
-        ctx.vocab_start = vocab_start
         return output
 
     @staticmethod
     @torch.autograd.function.once_differentiable
     def backward(ctx, grad_output):
         logits, token_ids, maxima, denominators = ctx.saved_tensors
-        n, vocab_size = logits.shape
+        n = logits.shape[0]
         grad_input = torch.empty_like(logits)
         for start in range(0, n, ctx.chunk_size):
             end = min(start + ctx.chunk_size, n)
@@ -153,20 +138,14 @@ class _TopKLogProbsFromLogits(torch.autograd.Function):
             work.sub_(maxima[start:end]).exp_().div_(denominators[start:end])
             grad = grad_output[start:end].float()
             work.mul_(-grad.sum(dim=-1, keepdim=True))
-            ids = token_ids[start:end]
-            local_mask = (ids >= ctx.vocab_start) & (ids < ctx.vocab_start + vocab_size)
-            local_ids = (ids - ctx.vocab_start).clamp(0, vocab_size - 1)
-            work.scatter_add_(-1, local_ids, grad.masked_fill(~local_mask, 0.0))
+            work.scatter_add_(-1, token_ids[start:end], grad)
             grad_input[start:end] = work
             del work
-        return grad_input, None, None, None
+        return grad_input, None, None
 
 
 def topk_log_probs_from_logits(
-    logits: torch.Tensor,
-    token_ids: torch.Tensor,
-    chunk_size: int = TOPK_LOG_PROB_CHUNK_SIZE,
-    process_group=None,
+    logits: torch.Tensor, token_ids: torch.Tensor, chunk_size: int = TOPK_LOG_PROB_CHUNK_SIZE
 ) -> torch.Tensor:
     """Compute full-vocab-normalized log-probs of ``logits`` at ``token_ids``, chunked for memory.
 
@@ -178,15 +157,12 @@ def topk_log_probs_from_logits(
         logits: Trainer logits, shape (N, V), any float dtype.
         token_ids: Token ids to gather, shape (N, k), any integer dtype.
         chunk_size: Number of rows processed per chunk. Default: 4096.
-        process_group: Optional process group if the vocab dimension is sharded across ranks,
-            in which case each rank holds a local shard of size V and ``token_ids`` are global
-            ids. Default: None (no sharding).
 
     Returns:
         Log-probs of ``token_ids`` under the full-vocab softmax of ``logits``, shape (N, k),
         dtype float32, with gradient to ``logits``.
     """
-    return _TopKLogProbsFromLogits.apply(logits, token_ids.long(), process_group, chunk_size)
+    return _TopKLogProbsFromLogits.apply(logits, token_ids.long(), chunk_size)
 
 
 def score_centering_weight_fn(

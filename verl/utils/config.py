@@ -98,6 +98,16 @@ def _validate_score_centering_config(config: DictConfig) -> None:
             "score centering must be enabled on both algorithm.rollout_correction.score_centering and "
             "actor_rollout_ref.actor.policy_loss.rollout_correction.score_centering."
         )
+    actor = config.actor_rollout_ref.actor
+    if actor.get("strategy") not in ("fsdp", "fsdp2"):
+        raise ValueError(
+            "score centering is implemented for the FSDP engine only; "
+            f"got actor_rollout_ref.actor.strategy={actor.get('strategy')!r}."
+        )
+    if actor.get("use_fused_kernels", False):
+        raise ValueError("score centering needs the full logits; set actor_rollout_ref.actor.use_fused_kernels=False.")
+    if (config.get("distillation") or {}).get("enabled", False):
+        raise ValueError("score centering cannot be combined with distillation.enabled=True.")
     if policy_loss.get("loss_mode") != "bypass_mode":
         raise ValueError("score centering requires actor_rollout_ref.actor.policy_loss.loss_mode=bypass_mode.")
     if config.actor_rollout_ref.rollout.get("topk_log_probs", 0) <= 0:
