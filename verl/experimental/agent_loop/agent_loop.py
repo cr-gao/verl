@@ -856,6 +856,8 @@ class AgentLoopWorker:
         if self.rollout_config.topk_log_probs and not validate:
             from verl.trainer.ppo.score_centering import pad_rollout_topk
 
+            if output.num_turns > 2:
+                raise ValueError("rollout.topk_log_probs supports the single-turn agent loop only.")
             if "response_topk_ids" not in output.extra_fields:
                 raise ValueError("rollout.topk_log_probs is set but the rollout returned no sampler top-k head.")
             rollout_topk_ids, rollout_topk_log_probs = pad_rollout_topk(

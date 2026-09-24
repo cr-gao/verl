@@ -77,12 +77,15 @@ def _with_routing_replay_flag(enabled: bool):
 
 def select_actor_loss_fn(actor_config, distillation_config):
     """Pick the actor loss function: distillation, score centering, or plain PPO."""
+    score_centering = actor_config.policy_loss.rollout_correction.score_centering
     if is_distillation_enabled(distillation_config):
+        if score_centering:
+            raise ValueError("score centering cannot be combined with distillation.")
         return partial(distillation_ppo_loss, config=actor_config, distillation_config=distillation_config)
-    if actor_config.policy_loss.rollout_correction.score_centering:
+    if score_centering:
         if actor_config.use_fused_kernels:
             raise NotImplementedError("score centering needs the full logits; set actor.use_fused_kernels=False.")
-        if actor_config.strategy == "megatron":
+        if actor_config.strategy not in ("fsdp", "fsdp2"):
             raise NotImplementedError("score centering is implemented for the FSDP engine only.")
         return partial(score_centering_ppo_loss, config=actor_config)
     return partial(ppo_loss, config=actor_config)

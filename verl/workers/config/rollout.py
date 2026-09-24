@@ -349,13 +349,20 @@ class RolloutConfig(BaseConfig):
                 f"rollout.disaggregation.enabled=True requires rollout.name in ('sglang', 'vllm'); got {self.name!r}."
             )
 
-        if self.topk_log_probs:
+        if self.topk_log_probs < 0:
+            raise ValueError(f"rollout.topk_log_probs must be >= 0, got {self.topk_log_probs}.")
+        if self.topk_log_probs > 0:
             if not self.calculate_log_probs:
                 raise ValueError("rollout.topk_log_probs requires rollout.calculate_log_probs=True.")
             if self.temperature <= 0 or self.top_p != 1.0 or self.top_k != -1:
                 raise ValueError(
                     "rollout.topk_log_probs requires temperature > 0, top_p=1.0 and top_k=-1 so the returned "
                     "head is the sampling distribution."
+                )
+            if self.logprobs_mode != "processed_logprobs":
+                raise ValueError(
+                    "rollout.topk_log_probs requires logprobs_mode='processed_logprobs' so the returned head is "
+                    "the sampling distribution."
                 )
             if self.name != "vllm":
                 raise ValueError("rollout.topk_log_probs is supported by the vLLM rollout only.")

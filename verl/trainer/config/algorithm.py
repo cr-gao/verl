@@ -206,6 +206,8 @@ class RolloutCorrectionConfig(BaseConfig):
             raise ValueError("score_centering requires bypass_mode=True and loss_type='reinforce'.")
         if self.rollout_is not in (None, "token"):
             raise ValueError("score_centering requires rollout_is=None or rollout_is='token'.")
+        if self.rollout_is_batch_normalize:
+            raise ValueError("score_centering requires rollout_is_batch_normalize=False.")
 
     @classmethod
     def decoupled_token_is(cls, threshold: float = 2.0) -> "RolloutCorrectionConfig":

@@ -443,6 +443,47 @@ async def test_agent_loop_postprocess_skips_rollout_topk_on_validate_on_cpu():
     assert internal.rollout_topk_log_probs is None
 
 
+@pytest.mark.asyncio
+async def test_agent_loop_postprocess_rejects_multi_turn_rollout_topk_on_cpu():
+    class _DummyWorker:
+        _compute_multi_modal_inputs = AgentLoopWorker._compute_multi_modal_inputs
+        _compute_position_ids = AgentLoopWorker._compute_position_ids
+        _get_mm_processor_kwargs = AgentLoopWorker._get_mm_processor_kwargs
+        _compute_score = AgentLoopWorker._compute_score
+        _compute_teacher_logprobs = AgentLoopWorker._compute_teacher_logprobs
+        _pad_token_ids = AgentLoopWorker._pad_token_ids
+        distillation_enabled = False
+
+        def __init__(self):
+            self.tokenizer = _FakeTokenizer()
+            self.rollout_config = OmegaConf.create({"prompt_length": 4, "response_length": 4, "topk_log_probs": 2})
+            self.processor = None
+            self.mm_processor_kwargs = {}
+            self.reward_loop_worker_handles = None
+
+    output = AgentLoopOutput(
+        prompt_ids=[101, 102],
+        response_ids=[11, 12],
+        response_mask=[1, 1],
+        num_turns=3,
+        metrics=AgentLoopMetrics(),
+        extra_fields={
+            "response_topk_ids": [[11, 13], [12, 14]],
+            "response_topk_log_probs": [[-0.1, -2.0], [-0.2, -1.5]],
+        },
+    )
+
+    # The sampler head is laid out over one prompt and one response, so tool or
+    # user turns in between would misalign it with the trainer's logits.
+    with pytest.raises(ValueError, match="single-turn"):
+        await AgentLoopWorker._agent_loop_postprocess(
+            _DummyWorker(),
+            output,
+            validate=False,
+            raw_prompt=[{"role": "user", "content": "hi"}],
+        )
+
+
 class _FakeTokenizerCustomPad:
     """A minimal tokenizer with a non-zero pad_token_id for testing."""
 

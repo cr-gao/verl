@@ -85,6 +85,25 @@ def _validate_router_replay_config(actor_config: Any, rollout_correction: Any) -
         )
 
 
+def _validate_score_centering_config(config: DictConfig) -> None:
+    algorithm_sc = config.algorithm.get("rollout_correction", {}).get("score_centering", False)
+    policy_loss = config.actor_rollout_ref.actor.policy_loss
+    actor_sc = policy_loss.get("rollout_correction", {}).get("score_centering", False)
+    if not (algorithm_sc or actor_sc):
+        return
+    if config.trainer.get("use_v1", False):
+        raise ValueError("score centering is not supported by the v1 trainer; set trainer.use_v1=False.")
+    if not (algorithm_sc and actor_sc):
+        raise ValueError(
+            "score centering must be enabled on both algorithm.rollout_correction.score_centering and "
+            "actor_rollout_ref.actor.policy_loss.rollout_correction.score_centering."
+        )
+    if policy_loss.get("loss_mode") != "bypass_mode":
+        raise ValueError("score centering requires actor_rollout_ref.actor.policy_loss.loss_mode=bypass_mode.")
+    if config.actor_rollout_ref.rollout.get("topk_log_probs", 0) <= 0:
+        raise ValueError("score centering requires actor_rollout_ref.rollout.topk_log_probs > 0.")
+
+
 def validate_config(
     config: DictConfig,
     use_reference_policy: bool,
@@ -164,6 +183,7 @@ def validate_config(
     actor_config = omega_conf_to_dataclass(config.actor_rollout_ref.actor)
     actor_config.validate(n_gpus, config.data.train_batch_size, config.actor_rollout_ref.model)
     _validate_router_replay_config(actor_config, config.algorithm.get("rollout_correction", None))
+    _validate_score_centering_config(config)
 
     if not config.actor_rollout_ref.actor.use_dynamic_bsz:
         if use_reference_policy:

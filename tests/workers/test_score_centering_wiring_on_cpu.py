@@ -15,6 +15,7 @@
 """CPU coverage for score centering's worker wiring: the actor loss-fn selection and the FSDP engine outputs."""
 
 from functools import partial
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -57,17 +58,26 @@ def test_select_actor_loss_fn_rejects_fused_kernels_for_score_centering():
         select_actor_loss_fn(config, distillation_config=None)
 
 
-def test_select_actor_loss_fn_rejects_megatron_for_score_centering():
+@pytest.mark.parametrize("strategy", ["megatron", "veomni"])
+def test_select_actor_loss_fn_rejects_non_fsdp_for_score_centering(strategy):
     config = ActorConfig(
-        strategy="megatron",
+        strategy=strategy,
         rollout_n=1,
         ppo_micro_batch_size_per_gpu=1,
         policy_loss=PolicyLossConfig(
             loss_mode="bypass_mode", rollout_correction=RolloutCorrectionConfig.bypass_pg_sc()
         ),
     )
-    with pytest.raises(NotImplementedError):
+    with pytest.raises(NotImplementedError, match="FSDP engine only"):
         select_actor_loss_fn(config, distillation_config=None)
+
+
+def test_select_actor_loss_fn_rejects_distillation_with_score_centering():
+    config = _actor_config(
+        policy_loss=PolicyLossConfig(loss_mode="bypass_mode", rollout_correction=RolloutCorrectionConfig.bypass_pg_sc())
+    )
+    with pytest.raises(ValueError, match="distillation"):
+        select_actor_loss_fn(config, distillation_config=SimpleNamespace(enabled=True))
 
 
 @pytest.mark.parametrize("use_remove_padding", [True, False])

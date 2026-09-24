@@ -38,6 +38,7 @@ def test_score_centering_presets_are_bypass_reinforce():
         dict(bypass_mode=False, loss_type="reinforce"),
         dict(bypass_mode=True, loss_type="ppo_clip"),
         dict(bypass_mode=True, loss_type="reinforce", rollout_is="sequence"),
+        dict(bypass_mode=True, loss_type="reinforce", rollout_is="token", rollout_is_batch_normalize=True),
     ],
 )
 def test_score_centering_rejects_unsupported_modes(kwargs):
@@ -52,6 +53,16 @@ def test_topk_log_probs_requires_calculate_log_probs_and_full_support():
         RolloutConfig(topk_log_probs=128, calculate_log_probs=True, top_p=0.9)
     with pytest.raises(ValueError, match="top_k"):
         RolloutConfig(topk_log_probs=128, calculate_log_probs=True, top_k=50)
+
+
+def test_topk_log_probs_requires_processed_logprobs():
+    with pytest.raises(ValueError, match="processed_logprobs"):
+        RolloutConfig(name="vllm", topk_log_probs=128, calculate_log_probs=True, logprobs_mode="raw_logprobs")
+
+
+def test_topk_log_probs_rejects_negative_head_size():
+    with pytest.raises(ValueError, match="must be >= 0"):
+        RolloutConfig(name="vllm", topk_log_probs=-1, calculate_log_probs=True)
 
 
 def test_topk_log_probs_requires_vllm_rollout():
