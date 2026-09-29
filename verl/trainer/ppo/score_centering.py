@@ -22,8 +22,12 @@ from collections.abc import Callable
 from typing import Optional
 
 import torch
+from tensordict import TensorDict
 
 from verl.trainer.ppo.rollout_corr_helper import _parse_rollout_is_threshold
+from verl.utils.ulysses import get_ulysses_sequence_parallel_world_size, slice_input_tensor
+from verl.workers.config import ActorConfig
+from verl.workers.utils.losses import ppo_loss
 
 TOPK_LOG_PROB_CHUNK_SIZE = 4096
 
@@ -227,3 +231,77 @@ def score_centering_correction(
         residual = q * head_weights - alpha.unsqueeze(-1) * p
     correction = (residual * train_head_log_probs).sum(-1)
     return correction, q_mass, p_mass
+
+
+def score_centering_logits_processor(
+    student_logits: torch.Tensor, data: TensorDict, config: ActorConfig, data_format: str = "thd"
+) -> dict[str, torch.Tensor]:
+    """Per-token centering term from the trainer logits, in the engine's logits-processor slot.
+
+    Args:
+        student_logits: Trainer logits, already temperature-scaled, shape (1, nnz/sp, V).
+        data: Micro input batch, holding the nested ``rollout_topk_ids``/``rollout_topk_log_probs``
+            sampler heads of shape [B, j, k].
+        config: Actor configuration, used for ``policy_loss.rollout_correction``.
+        data_format: "thd" or "bshd". Only "thd" is supported.
+
+    Returns:
+        Dict with, each of shape (1, nnz/sp):
+            sc_correction: Centering term, with gradient to ``student_logits``.
+            sc_sampler_head_mass: Sampler's head probability mass, detached.
+            sc_train_head_mass: Trainer's head probability mass, detached.
+    """
+    if data_format != "thd":
+        raise NotImplementedError("score centering supports the thd (remove padding) format only.")
+    topk_ids = data["rollout_topk_ids"].values().unsqueeze(0)
+    topk_log_probs = data["rollout_topk_log_probs"].values().unsqueeze(0)
+    if get_ulysses_sequence_parallel_world_size() > 1:
+        topk_ids = slice_input_tensor(topk_ids, dim=1)
+        topk_log_probs = slice_input_tensor(topk_log_probs, dim=1)
+    assert topk_ids.shape[:2] == topk_log_probs.shape[:2] == student_logits.shape[:2], (
+        topk_ids.shape,
+        topk_log_probs.shape,
+        student_logits.shape,
+    )
+    rollout_correction = config.policy_loss.rollout_correction
+    weight_fn = score_centering_weight_fn(
+        rollout_correction.get("rollout_is", None), rollout_correction.get("rollout_is_threshold", 2.0)
+    )
+    train_head_log_probs = topk_log_probs_from_logits(student_logits.squeeze(0), topk_ids.squeeze(0))
+    correction, sampler_head_mass, train_head_mass = score_centering_correction(
+        train_head_log_probs, topk_log_probs.squeeze(0), weight_fn
+    )
+    return {
+        "sc_correction": correction.unsqueeze(0),
+        "sc_sampler_head_mass": sampler_head_mass.unsqueeze(0),
+        "sc_train_head_mass": train_head_mass.unsqueeze(0),
+    }
+
+
+def score_centering_ppo_loss(
+    config: ActorConfig,
+    model_output: dict = None,
+    data: TensorDict = None,
+    dp_group=None,
+    student_logits: torch.Tensor = None,
+    data_format: str = "thd",
+):
+    """Actor loss function used both for the logits processor and the final policy loss.
+    - student_logits is not None, compute the centering term in the logits processor.
+    - student_logits is None, compute the final policy loss.
+
+    Args:
+        config: Actor configuration.
+        model_output: Model output, including log_probs and sc_correction.
+        data: Micro input batch, contains the nested rollout top-k head.
+        dp_group: Data parallel group for ``ppo_loss``.
+        student_logits: (1, nnz/sp, V).
+        data_format: "thd" or "bshd". Only "thd" is supported.
+
+    Returns:
+        student_logits is not None: dict from ``score_centering_logits_processor``.
+        student_logits is None: the (loss, metrics) tuple from ``ppo_loss``.
+    """
+    if student_logits is not None:
+        return score_centering_logits_processor(student_logits, data, config, data_format)
+    return ppo_loss(config, model_output, data, dp_group)
