@@ -53,48 +53,31 @@ def dummy_rollout_topk(
 
 
 def pad_rollout_topk(
-    response_topk_ids: torch.Tensor | list,
-    response_topk_log_probs: torch.Tensor | list,
-    *,
-    k: int,
-    prompt_width: int,
-    response_width: int,
-    response_length: int,
+    response_topk_ids: torch.Tensor | list, response_topk_log_probs: torch.Tensor | list, prompt_length: int
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Lay the sampler's response-token heads over the padded full sequence.
+    """Lay the sampler's response-token heads over the unpadded prompt+response sequence.
 
-    Prompts are left-padded to ``prompt_width`` and responses are right-padded to
-    ``response_width``, so response token r sits at sequence column ``prompt_width + r``
-    and is predicted by the logits row ``prompt_width - 1 + r``; its sampler head goes there.
-    Rows outside the response (prompt and padding) get the uniform dummy head.
+    Response token r is predicted by the logits row ``prompt_length - 1 + r``, so its sampler head
+    goes there; the other rows get the uniform dummy head.
 
     Args:
-        response_topk_ids: Sampler top-k token ids for the response tokens, shape
-            (response_length, k), array-like of ints.
-        response_topk_log_probs: Sampler top-k log-probs matching ``response_topk_ids``,
-            shape (response_length, k), array-like of floats.
-        k: Head size.
-        prompt_width: Padded prompt length.
-        response_width: Padded response length.
-        response_length: Number of real (non-padding) response tokens.
+        response_topk_ids: Sampler top-k token ids per response token, shape (R, k), array-like of ints.
+        response_topk_log_probs: Sampler top-k log-probs matching ``response_topk_ids``, shape (R, k).
+        prompt_length: Number of prompt tokens.
 
     Returns:
         Tuple containing:
-            ids: Full-sequence top-k ids, shape (1, prompt_width + response_width, k), dtype int32.
+            ids: Full-sequence top-k ids, shape (prompt_length + R, k), dtype int32.
             log_probs: Full-sequence top-k log-probs matching ``ids``, same shape, dtype float32.
     """
-    ids = torch.as_tensor(response_topk_ids, dtype=torch.int32)[:response_length]
-    log_probs = torch.as_tensor(response_topk_log_probs, dtype=torch.float32)[:response_length]
-    if ids.shape != (response_length, k) or log_probs.shape != (response_length, k):
-        raise ValueError(
-            f"score centering needs one sampler top-{k} head per response token, "
-            f"got {tuple(ids.shape)} for {response_length} tokens"
-        )
-    full_ids, full_log_probs = dummy_rollout_topk(prompt_width + response_width, k)
-    start = prompt_width - 1
+    ids = torch.as_tensor(response_topk_ids, dtype=torch.int32)
+    log_probs = torch.as_tensor(response_topk_log_probs, dtype=torch.float32)
+    response_length, k = ids.shape
+    full_ids, full_log_probs = dummy_rollout_topk(prompt_length + response_length, k)
+    start = prompt_length - 1
     full_ids[start : start + response_length] = ids
     full_log_probs[start : start + response_length] = log_probs
-    return full_ids.unsqueeze(0), full_log_probs.unsqueeze(0)
+    return full_ids, full_log_probs
 
 
 class _TopKLogProbsFromLogits(torch.autograd.Function):
@@ -171,8 +154,8 @@ def score_centering_weight_fn(
     """Build the token-level IS rule as a function of a ratio, shared by the head and sampled token.
 
     Args:
-        rollout_is: Importance-sampling mode score centering composes with: None (no IS weight)
-            or "token" (TIS or IcePop, depending on ``rollout_is_threshold``).
+        rollout_is: None for no IS weight, "token" for TIS or IcePop depending on
+            ``rollout_is_threshold``.
         rollout_is_threshold: Threshold specification, see ``_parse_rollout_is_threshold``: a
             single float or float-like string upper-clamps (TIS); a "lower_upper" string zeros
             ratios outside the band (IcePop).
@@ -182,8 +165,6 @@ def score_centering_weight_fn(
     """
     if rollout_is is None:
         return torch.ones_like
-    if rollout_is != "token":
-        raise ValueError(f"score centering composes with token-level IS only, got rollout_is={rollout_is!r}")
     upper, lower = _parse_rollout_is_threshold(rollout_is_threshold)
     if lower is None:
         return lambda ratio: ratio.clamp(max=upper)
@@ -258,11 +239,6 @@ def score_centering_logits_processor(
     if get_ulysses_sequence_parallel_world_size() > 1:
         topk_ids = slice_input_tensor(topk_ids, dim=1)
         topk_log_probs = slice_input_tensor(topk_log_probs, dim=1)
-    assert topk_ids.shape[:2] == topk_log_probs.shape[:2] == student_logits.shape[:2], (
-        topk_ids.shape,
-        topk_log_probs.shape,
-        student_logits.shape,
-    )
     rollout_correction = config.policy_loss.rollout_correction
     weight_fn = score_centering_weight_fn(
         rollout_correction.get("rollout_is", None), rollout_correction.get("rollout_is_threshold", 2.0)

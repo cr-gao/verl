@@ -2537,8 +2537,6 @@ def compute_policy_loss_bypass_mode(
         )
 
     elif loss_type == "ppo_clip":
-        if sc_correction is not None:
-            raise ValueError("score centering requires loss_type='reinforce' in bypass mode.")
         # PPO-clip: The ratio π_current/π_old = π_current/π_rollout already handles IS
         # DO NOT apply IS weights - would be double-counting!
         # The clipping mechanism constrains the effective IS ratio

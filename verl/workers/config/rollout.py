@@ -349,29 +349,18 @@ class RolloutConfig(BaseConfig):
                 f"rollout.disaggregation.enabled=True requires rollout.name in ('sglang', 'vllm'); got {self.name!r}."
             )
 
-        if self.topk_log_probs < 0:
-            raise ValueError(f"rollout.topk_log_probs must be >= 0, got {self.topk_log_probs}.")
-        if self.topk_log_probs > 0:
-            if not self.calculate_log_probs:
-                raise ValueError("rollout.topk_log_probs requires rollout.calculate_log_probs=True.")
-            if self.temperature <= 0 or self.top_p != 1.0 or self.top_k != -1:
-                raise ValueError(
-                    "rollout.topk_log_probs requires temperature > 0, top_p=1.0 and top_k=-1 so the returned "
-                    "head is the sampling distribution."
-                )
-            if self.logprobs_mode != "processed_logprobs":
-                raise ValueError(
-                    "rollout.topk_log_probs requires logprobs_mode='processed_logprobs' so the returned head is "
-                    "the sampling distribution."
-                )
+        if self.topk_log_probs:
             if self.name != "vllm":
                 raise ValueError("rollout.topk_log_probs is supported by the vLLM rollout only.")
-            vllm_kwargs = self.engine_kwargs.setdefault("vllm", {})
-            max_logprobs = vllm_kwargs.get("max_logprobs")
-            if max_logprobs is None:
-                vllm_kwargs["max_logprobs"] = self.topk_log_probs
-            elif max_logprobs < self.topk_log_probs:
+            if (
+                not self.calculate_log_probs
+                or self.top_p != 1.0
+                or self.top_k != -1
+                or self.logprobs_mode != "processed_logprobs"
+            ):
                 raise ValueError(
-                    f"engine_kwargs.vllm.max_logprobs ({max_logprobs}) must be >= rollout.topk_log_probs "
-                    f"({self.topk_log_probs})."
+                    "rollout.topk_log_probs needs calculate_log_probs=True, top_p=1.0, top_k=-1 and "
+                    "logprobs_mode='processed_logprobs' so the returned head is the sampling distribution."
                 )
+            vllm_kwargs = self.engine_kwargs.setdefault("vllm", {})
+            vllm_kwargs["max_logprobs"] = max(vllm_kwargs.get("max_logprobs", 0), self.topk_log_probs)

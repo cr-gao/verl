@@ -195,8 +195,6 @@ class AgentLoopWorkerTQ(AgentLoopWorker):
 
             keys.append(f"{uid}_{session_id}_{i}")
             field = output.as_dict()
-            if self.rollout_config.topk_log_probs and not validate and "rollout_topk_ids" not in field:
-                raise ValueError("rollout.topk_log_probs is set but the rollout returned no sampler top-k head.")
             field.update(kwargs)
             # do not store raw image/video
             field.pop("multi_modal_data", None)

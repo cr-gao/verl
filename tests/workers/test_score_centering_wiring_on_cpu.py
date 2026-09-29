@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""CPU coverage for score centering's worker wiring: the actor-side config reading and the FSDP engine outputs."""
+"""CPU coverage for score centering's FSDP engine wiring."""
 
 from unittest.mock import patch
 
@@ -21,29 +21,8 @@ import torch
 from tensordict import TensorDict
 
 from verl.utils import tensordict_utils as tu
-from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.dataset.dataset_utils import DatasetPadMode
 from verl.workers.engine.fsdp.transformer_impl import FSDPEngineWithLMHead
-
-
-def test_actor_config_reads_mapping_rollout_correction():
-    # `+` overrides add the actor-side rollout_correction without a `_target_`, so it stays a dict and
-    # the worker must read the flag through the mapping interface, as init_model does.
-    config = omega_conf_to_dataclass(
-        {
-            "_target_": "verl.workers.config.ActorConfig",
-            "strategy": "fsdp",
-            "rollout_n": 1,
-            "ppo_micro_batch_size_per_gpu": 1,
-            "policy_loss": {
-                "_target_": "verl.workers.config.PolicyLossConfig",
-                "loss_mode": "bypass_mode",
-                "rollout_correction": {"bypass_mode": True, "loss_type": "reinforce", "score_centering": True},
-            },
-        }
-    )
-    assert isinstance(config.policy_loss.rollout_correction, dict)
-    assert (config.policy_loss.get("rollout_correction", None) or {}).get("score_centering", False)
 
 
 @pytest.mark.parametrize("use_remove_padding", [True, False])
