@@ -203,6 +203,23 @@ def test_agent_loop_output_as_dict_rejects_multi_turn_rollout_topk():
         output.as_dict()
 
 
+def test_agent_loop_output_as_dict_rejects_misaligned_rollout_topk():
+    output = AgentLoopOutput(
+        prompt_ids=[1, 2],
+        response_ids=[3, 4],
+        response_mask=[1, 1],
+        num_turns=2,
+        metrics=AgentLoopMetrics(),
+        extra_fields={
+            "response_topk_ids": np.array([[3, 9], [4, 8], [5, 7]], dtype=np.int32),
+            "response_topk_log_probs": np.full((3, 2), -0.5, dtype=np.float32),
+        },
+    )
+
+    with pytest.raises(ValueError, match="cover 3 tokens"):
+        output.as_dict()
+
+
 @pytest.mark.asyncio
 async def test_agent_loop_worker_passes_only_hf_model_type_through_hydra(monkeypatch):
     captured_kwargs: dict[str, Any] = {}

@@ -623,6 +623,9 @@ class vLLMHttpServer:
         )
         topk_log_probs = sampling_params.pop("topk_log_probs", 0)
         sampling_params["logprobs"] = (topk_log_probs or 0) if sampling_params.pop("logprobs", False) else None
+        if sampling_params["logprobs"]:
+            # the top-k head is read from flat lists, see extract_response_topk_logprobs
+            sampling_params["flat_logprobs"] = True
         sampling_params.setdefault("repetition_penalty", self.config.get("repetition_penalty", 1.0))
         sampling_params.setdefault("ignore_eos", self.config.get("ignore_eos", False))
         # Inject per-request seed for deterministic sampling when full_determinism is enabled.
@@ -724,12 +727,13 @@ class vLLMHttpServer:
         )
         token_ids = final_res.outputs[0].token_ids
         log_probs = None
-        if sampling_params.logprobs is not None:
-            log_probs = [logprobs[token_ids[i]].logprob for i, logprobs in enumerate(final_res.outputs[0].logprobs)]
         if sampling_params.logprobs:
-            extra_fields["response_topk_ids"], extra_fields["response_topk_log_probs"] = extract_response_topk_logprobs(
-                final_res.outputs[0].logprobs, sampling_params.logprobs
+            # indexing FlatLogprobs per position would rebuild a k+1 dict per token
+            log_probs, extra_fields["response_topk_ids"], extra_fields["response_topk_log_probs"] = (
+                extract_response_topk_logprobs(final_res.outputs[0].logprobs, sampling_params.logprobs)
             )
+        elif sampling_params.logprobs is not None:
+            log_probs = [logprobs[token_ids[i]].logprob for i, logprobs in enumerate(final_res.outputs[0].logprobs)]
 
         routed_experts = None
         if self.config.enable_rollout_routing_replay:

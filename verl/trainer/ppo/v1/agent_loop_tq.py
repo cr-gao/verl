@@ -67,16 +67,16 @@ class AgentLoopWorkerTQ(AgentLoopWorker):
             top_k=config.top_k,
             repetition_penalty=1.0,
             logprobs=config.calculate_log_probs,
-            topk_log_probs=config.topk_log_probs,
         )
+        # the trainer never consumes the sampler head on validation rollouts
+        if config.topk_log_probs and not validate:
+            sampling_params["topk_log_probs"] = config.topk_log_probs
 
         # override sampling params for validation
         if validate:
             sampling_params["top_p"] = config.val_kwargs.top_p
             sampling_params["top_k"] = config.val_kwargs.top_k
             sampling_params["temperature"] = config.val_kwargs.temperature
-            # the trainer never consumes the sampler head on validation rollouts
-            sampling_params["topk_log_probs"] = 0
 
         # by default, we assume it's a single turn agent
         if "agent_name" not in batch:

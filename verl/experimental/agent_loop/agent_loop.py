@@ -167,6 +167,11 @@ class AgentLoopOutput(BaseModel):
 
             if self.num_turns > 2:
                 raise ValueError("rollout.topk_log_probs supports the single-turn agent loop only.")
+            if len(response_topk_ids) != output["responses"].size(0):
+                raise ValueError(
+                    f"sampler top-k heads cover {len(response_topk_ids)} tokens, "
+                    f"but the response has {output['responses'].size(0)}."
+                )
             output["rollout_topk_ids"], output["rollout_topk_log_probs"] = pad_rollout_topk(
                 response_topk_ids, response_topk_log_probs, prompt_length=output["prompts"].size(0)
             )

@@ -15,9 +15,12 @@
 
 import math
 from dataclasses import dataclass
+from types import SimpleNamespace
 
+import numpy as np
 import pytest
 import torch
+from omegaconf import OmegaConf
 from tensordict import TensorDict
 
 from verl.trainer.config.algorithm import RolloutCorrectionConfig
@@ -33,6 +36,7 @@ from verl.trainer.ppo.score_centering import (
     topk_log_probs_from_logits,
 )
 from verl.utils import tensordict_utils as tu
+from verl.utils.config import _validate_score_centering_config
 from verl.workers.config import ActorConfig, PolicyLossConfig
 from verl.workers.config.rollout import RolloutConfig
 from verl.workers.rollout.utils import extract_response_topk_logprobs
@@ -92,6 +96,60 @@ def test_topk_log_probs_raises_vllm_max_logprobs():
         name="vllm", topk_log_probs=128, calculate_log_probs=True, engine_kwargs={"vllm": {"max_logprobs": 20}}
     )
     assert cfg.engine_kwargs["vllm"]["max_logprobs"] == 128
+
+
+_RC = {"bypass_mode": True, "loss_type": "reinforce", "rollout_is": "token", "rollout_is_threshold": 2.0}
+
+
+def _config(algorithm_rc=None, actor_rc=None, **overrides):
+    config = {
+        "algorithm": {"rollout_correction": {**_RC, "score_centering": True, **(algorithm_rc or {})}},
+        "actor_rollout_ref": {
+            "actor": {"strategy": "fsdp", "policy_loss": {"loss_mode": "bypass_mode"}},
+            "rollout": {"name": "vllm", "topk_log_probs": 128},
+        },
+        "distillation": {"enabled": False},
+        "trainer": {"use_v1": True},
+    }
+    if actor_rc is not False:
+        config["actor_rollout_ref"]["actor"]["policy_loss"]["rollout_correction"] = {
+            **_RC,
+            "score_centering": True,
+            **(actor_rc or {}),
+        }
+    config = OmegaConf.create(config)
+    for key, value in overrides.items():
+        OmegaConf.update(config, key, value)
+    return config
+
+
+def test_score_centering_config_accepts_consistent_settings():
+    _validate_score_centering_config(_config())
+
+
+def test_score_centering_config_skips_checks_when_off():
+    _validate_score_centering_config(
+        _config(algorithm_rc={"score_centering": False}, actor_rc=False, **{"trainer.use_v1": False})
+    )
+
+
+@pytest.mark.parametrize(
+    "kwargs, match",
+    [
+        (dict(actor_rc=False), "both"),
+        (dict(algorithm_rc={"score_centering": False}), "both"),
+        (dict(actor_rc={"rollout_is": "sequence"}), "score_centering"),
+        (dict(actor_rc={"rollout_is_threshold": 3.0}), "match"),
+        ({"trainer.use_v1": False}, "use_v1"),
+        ({"actor_rollout_ref.actor.strategy": "megatron"}, "strategy"),
+        ({"actor_rollout_ref.rollout.name": "sglang"}, "vllm"),
+        ({"actor_rollout_ref.rollout.topk_log_probs": 0}, "topk_log_probs"),
+        ({"distillation.enabled": True}, "distillation"),
+    ],
+)
+def test_score_centering_config_rejects_misconfigurations(kwargs, match):
+    with pytest.raises(ValueError, match=match):
+        _validate_score_centering_config(_config(**kwargs))
 
 
 def _full_vocab_centering(logits, sampler_log_probs):
@@ -224,17 +282,107 @@ def test_pad_rollout_topk_places_heads_after_last_prompt_token():
 
 
 @dataclass
-class _Logprob:
-    logprob: float
-    rank: int
+class _FlatLogprobs:
+    """Minimal stand-in for vLLM ``FlatLogprobs``: ``[sampled, top-1, ..., top-k]`` per position."""
+
+    token_ids: list[int]
+    logprobs: list[float]
+    num_positions: int
+
+    def __len__(self):
+        return self.num_positions
 
 
-def test_extract_orders_head_by_rank_and_drops_out_of_head_sampled_token():
-    step_in_head = {7: _Logprob(-0.1, 1), 3: _Logprob(-1.5, 2), 9: _Logprob(-2.0, 3)}
-    step_outside = {3: _Logprob(-0.2, 1), 7: _Logprob(-1.0, 2), 9: _Logprob(-1.9, 3), 42: _Logprob(-8.0, 17)}
-    ids, log_probs = extract_response_topk_logprobs([step_in_head, step_outside], k=3)
-    assert ids == [[7, 3, 9], [3, 7, 9]]
-    assert log_probs == [[-0.1, -1.5, -2.0], [-0.2, -1.0, -1.9]]
+def test_extract_reads_sampled_token_and_head_by_rank():
+    # position 0 samples the top-1 token; position 1 samples token 42, outside the head
+    flat = _FlatLogprobs(
+        token_ids=[7, 7, 3, 9, 42, 3, 7, 9],
+        logprobs=[-0.1, -0.1, -1.5, -2.0, -8.0, -0.2, -1.0, -1.9],
+        num_positions=2,
+    )
+    sampled, ids, log_probs = extract_response_topk_logprobs(flat, k=3)
+    assert sampled == pytest.approx([-0.1, -8.0])
+    assert ids.dtype == np.int32 and log_probs.dtype == np.float32
+    assert ids.tolist() == [[7, 3, 9], [3, 7, 9]]
+    np.testing.assert_allclose(log_probs, [[-0.1, -1.5, -2.0], [-0.2, -1.0, -1.9]], rtol=1e-6)
+
+
+def test_extract_rejects_ragged_rows():
+    flat = _FlatLogprobs(token_ids=[7, 7, 3], logprobs=[-0.1, -0.1, -1.5], num_positions=1)
+    with pytest.raises(ValueError, match="entries per generated token"):
+        extract_response_topk_logprobs(flat, k=3)
+
+
+def test_extract_matches_vllm_dict_logprobs():
+    vllm_logprobs = pytest.importorskip("vllm.logprobs")
+    k, num_tokens = 4, 6
+    generator = torch.Generator().manual_seed(0)
+    flat, rows, actions = vllm_logprobs.FlatLogprobs(), [], []
+    for position in range(num_tokens):
+        values, order = torch.log_softmax(torch.randn(32, generator=generator), -1).sort(descending=True)
+        # alternate between a sampled token inside the head and one outside it
+        action = int(order[1] if position % 2 == 0 else order[k + 3])
+        action_value = float(values[(order == action).nonzero().item()])
+        token_ids, log_probs = [action] + order[:k].tolist(), [action_value] + values[:k].tolist()
+        rank = int((values >= action_value).sum())
+        vllm_logprobs.append_logprobs_for_next_position(flat, token_ids, log_probs, [None] * (k + 1), rank, k)
+        vllm_logprobs.append_logprobs_for_next_position(rows, token_ids, log_probs, [None] * (k + 1), rank, k)
+        actions.append(action)
+
+    sampled, ids, log_probs = extract_response_topk_logprobs(flat, k)
+    # vLLM's dict view is what the server read before switching to flat_logprobs
+    assert sampled == [rows[i][actions[i]].logprob for i in range(num_tokens)]
+    head = [sorted((v.rank, t, v.logprob) for t, v in row.items() if v.rank <= k) for row in rows]
+    assert ids.tolist() == [[t for _, t, _ in row] for row in head]
+    assert log_probs.tolist() == [[np.float32(v).item() for _, _, v in row] for row in head]
+
+
+async def _generate_with_segments(monkeypatch, segments):
+    from verl.workers.rollout import llm_server
+    from verl.workers.rollout.llm_server import FullyAsyncLLMServerClient
+
+    pending = iter(segments)
+
+    async def fake_generate(self, request_id, *, prompt_ids, **kwargs):
+        return next(pending)
+
+    async def no_wait(_delay, *args, **kwargs):
+        return None
+
+    # generate reaches the upstream through super(), so the base class is patched
+    monkeypatch.setattr(llm_server.LLMServerClient, "generate", fake_generate)
+    monkeypatch.setattr(llm_server.asyncio, "sleep", no_wait)
+    client = FullyAsyncLLMServerClient(config=SimpleNamespace(), load_balancer_handle=None)
+    return await client.generate(request_id="req-0", prompt_ids=[1, 2, 3], sampling_params={})
+
+
+@pytest.mark.asyncio
+async def test_fully_async_client_concatenates_rollout_topk_across_resumes(monkeypatch):
+    from verl.workers.rollout.replica import TokenOutput
+
+    def head(base, n):
+        return {
+            "response_topk_ids": np.arange(base, base + 2 * n, dtype=np.int32).reshape(n, 2),
+            "response_topk_log_probs": np.full((n, 2), -float(base), dtype=np.float32),
+        }
+
+    segments = [
+        TokenOutput(token_ids=[101, 102], stop_reason="aborted", extra_fields=head(10, 2)),
+        TokenOutput(token_ids=[103], stop_reason="completed", extra_fields=head(20, 1)),
+    ]
+    output = await _generate_with_segments(monkeypatch, segments)
+    assert output.token_ids == [101, 102, 103]
+    assert output.extra_fields["response_topk_ids"].tolist() == [[10, 11], [12, 13], [20, 21]]
+    assert output.extra_fields["response_topk_log_probs"].tolist() == [[-10, -10], [-10, -10], [-20, -20]]
+    assert output.extra_fields["response_topk_ids"].dtype == np.int32
+
+
+@pytest.mark.asyncio
+async def test_fully_async_client_without_rollout_topk_stays_unchanged(monkeypatch):
+    from verl.workers.rollout.replica import TokenOutput
+
+    output = await _generate_with_segments(monkeypatch, [TokenOutput(token_ids=[101], stop_reason="completed")])
+    assert "response_topk_ids" not in output.extra_fields
 
 
 def test_padding_template_uses_dummy_heads():
