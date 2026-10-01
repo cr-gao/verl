@@ -280,4 +280,11 @@ def score_centering_ppo_loss(
     """
     if student_logits is not None:
         return score_centering_logits_processor(student_logits, data, config, data_format)
+    rollout_correction = config.policy_loss.get("rollout_correction", None) or {}
+    if rollout_correction.get("score_centering", False) and "sc_correction" not in model_output:
+        # an entrypoint that never sets the micro-batch flag would otherwise train plain bypass PG
+        raise RuntimeError(
+            "score centering is enabled but the logits processor did not run: the trainer must set the "
+            "score_centering micro-batch flag (supported by the v1 trainer only)."
+        )
     return ppo_loss(config, model_output, data, dp_group)

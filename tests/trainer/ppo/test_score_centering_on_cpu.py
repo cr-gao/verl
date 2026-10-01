@@ -618,3 +618,10 @@ def test_ppo_loss_gradient_is_unchanged_on_policy():
     assert metrics["actor/sc_correction"].aggregate() == 0.0
     assert torch.equal(loss_sc, loss_pg)
     assert torch.equal(grad_sc, grad_pg)
+
+
+def test_score_centering_loss_rejects_missing_correction():
+    # e.g. an entrypoint that selects the loss but never sets the score_centering micro-batch flag
+    config = _actor_config(RolloutCorrectionConfig.bypass_pg_token_tis_sc())
+    with pytest.raises(RuntimeError, match="logits processor did not run"):
+        score_centering_ppo_loss(config, model_output={"log_probs": torch.zeros(1, 2)}, data=None)
