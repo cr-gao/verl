@@ -32,7 +32,7 @@ from verl.checkpoint_engine import CheckpointEngineRegistry
 from verl.single_controller.base import Worker
 from verl.single_controller.base.decorator import Dispatch, make_nd_compute_dataproto_dispatch_fn, register
 from verl.trainer.distillation import distillation_ppo_loss, is_distillation_enabled
-from verl.trainer.ppo.score_centering import score_centering_ppo_loss
+from verl.trainer.ppo.score_centering import layout_rollout_topk, score_centering_ppo_loss
 from verl.utils import tensordict_utils as tu
 from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.device import get_device_name, get_torch_device, set_expandable_segments
@@ -768,6 +768,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
     @DistProfiler.annotate(color="red", role="actor_update", scheduled=True)
     @_with_routing_replay_flag(enabled=True)
     def update_actor(self, data: TensorDict) -> TensorDict:
+        data = layout_rollout_topk(data)
         output = self.actor.train_mini_batch(data=data)
         return output.cpu() if output is not None else None
 

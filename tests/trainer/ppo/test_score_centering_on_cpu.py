@@ -474,7 +474,75 @@ async def test_fully_async_client_without_rollout_topk_stays_unchanged(monkeypat
     assert "response_topk_ids" not in output.extra_fields
 
 
-def test_padding_template_uses_dummy_heads():
+def _jagged_batch(**columns):
+    from verl.utils.tensordict_utils import list_of_dict_to_tensordict
+
+    num_samples = len(next(iter(columns.values())))
+    rows = [{name: torch.as_tensor(values[i]) for name, values in columns.items()} for i in range(num_samples)]
+    return list_of_dict_to_tensordict(rows)
+
+
+def test_layout_rollout_topk_matches_the_former_agent_loop_layout():
+    from verl.trainer.ppo.score_centering import layout_rollout_topk
+
+    ids = torch.tensor([[4, 9], [5, 8]], dtype=torch.int32)
+    log_probs = torch.tensor([[-0.1, -2.0], [-0.2, -1.5]])
+    ref_ids, ref_log_probs = pad_rollout_topk(ids, log_probs, prompt_length=3)
+    data = _jagged_batch(
+        prompts=[[1, 2, 3]],
+        responses=[[4, 5]],
+        response_topk_ids=[ids],
+        response_topk_log_probs=[log_probs],
+        response_support_complete=[torch.tensor([False, True])],
+    )
+
+    out = layout_rollout_topk(data)
+
+    assert torch.equal(out["rollout_topk_ids"][0], ref_ids)
+    assert torch.equal(out["rollout_topk_log_probs"][0], ref_log_probs)
+    assert out["rollout_support_complete"][0].tolist() == [True, True, False, True, True]
+    assert out["rollout_support_complete"].dtype == torch.bool
+    assert "response_topk_ids" not in out.keys() and "response_support_complete" not in out.keys()
+
+
+def test_layout_rollout_topk_rejects_misaligned_heads():
+    from verl.trainer.ppo.score_centering import layout_rollout_topk
+
+    data = _jagged_batch(
+        prompts=[[1, 2]],
+        responses=[[3, 4]],
+        response_topk_ids=[torch.zeros(3, 2, dtype=torch.int32)],
+        response_topk_log_probs=[torch.zeros(3, 2)],
+        response_support_complete=[torch.zeros(3, dtype=torch.bool)],
+    )
+    with pytest.raises(ValueError, match="cover 3 tokens"):
+        layout_rollout_topk(data)
+
+
+def test_layout_rollout_topk_requires_support_coverage_with_heads():
+    from verl.trainer.ppo.score_centering import layout_rollout_topk
+
+    data = _jagged_batch(
+        prompts=[[1, 2]],
+        responses=[[3, 4]],
+        response_topk_ids=[torch.zeros(2, 2, dtype=torch.int32)],
+        response_topk_log_probs=[torch.zeros(2, 2)],
+    )
+    with pytest.raises(KeyError, match="response_support_complete"):
+        layout_rollout_topk(data)
+
+
+def test_layout_rollout_topk_is_identity_without_heads():
+    from verl.trainer.ppo.score_centering import layout_rollout_topk
+
+    data = _jagged_batch(prompts=[[1]], responses=[[2]])
+    assert layout_rollout_topk(data) is data
+
+
+def test_padding_template_emits_raw_one_row_heads_that_lay_out():
+    from verl.trainer.ppo.padding_utils import SYNTHETIC_PADDING_SEQ_LEN
+    from verl.trainer.ppo.score_centering import layout_rollout_topk
+
     k = 3
     sample = TensorDict(
         {
@@ -484,15 +552,21 @@ def test_padding_template_uses_dummy_heads():
             "attention_mask": torch.ones(6, dtype=torch.int64),
             "response_mask": torch.ones(2, dtype=torch.int64),
             "position_ids": torch.arange(6),
-            "rollout_topk_ids": torch.zeros(6, k, dtype=torch.int32),
-            "rollout_topk_log_probs": torch.zeros(6, k),
+            "response_topk_ids": torch.zeros(2, k, dtype=torch.int32),
+            "response_topk_log_probs": torch.zeros(2, k),
+            "response_support_complete": torch.zeros(2, dtype=torch.bool),
         },
         batch_size=[],
     )
     template, _ = construct_minimal_padding_template(sample, {}, eos_token_id=0)
-    seq_len = template["input_ids"].shape[0]
-    assert template["rollout_topk_ids"].shape == (seq_len, k)
-    torch.testing.assert_close(template["rollout_topk_log_probs"].exp().sum(-1), torch.ones(seq_len))
+    assert template["response_topk_ids"].shape == (1, k) and template["response_topk_ids"].dtype == torch.int32
+    torch.testing.assert_close(template["response_topk_log_probs"].exp().sum(-1), torch.ones(1))
+    assert template["response_support_complete"].tolist() == [True]
+    assert "rollout_topk_ids" not in template
+
+    out = layout_rollout_topk(_jagged_batch(**{key: [template[key]] for key in template.keys()}))
+    assert out["rollout_topk_ids"][0].shape == (SYNTHETIC_PADDING_SEQ_LEN, k)
+    assert out["rollout_support_complete"][0].all()
 
 
 def _actor_config(rollout_correction):

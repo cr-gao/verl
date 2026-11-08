@@ -112,13 +112,12 @@ def construct_minimal_padding_template(
     if teacher_logprobs is not None:
         template_sample["teacher_logprobs"] = teacher_logprobs.new_zeros((sequence_length, *teacher_logprobs.shape[1:]))
 
-    rollout_topk_ids = template_sample.get("rollout_topk_ids")
-    if rollout_topk_ids is not None:
-        ids, log_probs = dummy_rollout_topk(sequence_length, rollout_topk_ids.shape[-1])
-        template_sample["rollout_topk_ids"] = ids
-        template_sample["rollout_topk_log_probs"] = log_probs
-        if "rollout_support_complete" in template_sample:
-            template_sample["rollout_support_complete"] = torch.ones(sequence_length, dtype=torch.bool)
+    response_topk_ids = template_sample.get("response_topk_ids")
+    if response_topk_ids is not None:
+        ids, log_probs = dummy_rollout_topk(responses.size(0), response_topk_ids.shape[-1])
+        template_sample["response_topk_ids"] = ids
+        template_sample["response_topk_log_probs"] = log_probs
+        template_sample["response_support_complete"] = torch.ones(responses.size(0), dtype=torch.bool)
 
     # Update the fields and remove redundant parts
     template_sample.update(

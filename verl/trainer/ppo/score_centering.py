@@ -83,6 +83,42 @@ def pad_rollout_topk(
     return full_ids, full_log_probs
 
 
+def layout_rollout_topk(data: TensorDict) -> TensorDict:
+    """Turn the rollout's per-response sampler heads into the full-sequence columns the loss reads.
+
+    ``response_topk_ids``, ``response_topk_log_probs`` and ``response_support_complete`` hold one
+    row per response token. They are replaced by ``rollout_topk_ids``, ``rollout_topk_log_probs``
+    and ``rollout_support_complete`` laid over the prompt+response sequence of each sample; prompt
+    rows get the dummy head and count as complete. A batch without heads is returned unchanged.
+    """
+    if "response_topk_ids" not in data.keys():
+        return data
+    ids_list, log_probs_list, complete_list = [], [], []
+    for prompts, responses, ids, log_probs, response_complete in zip(
+        data["prompts"].unbind(),
+        data["responses"].unbind(),
+        data.pop("response_topk_ids").unbind(),
+        data.pop("response_topk_log_probs").unbind(),
+        data.pop("response_support_complete").unbind(),
+        strict=True,
+    ):
+        if ids.shape[0] != responses.shape[0]:
+            raise ValueError(
+                f"sampler top-k heads cover {ids.shape[0]} tokens, but the response has {responses.shape[0]}."
+            )
+        prompt_length = prompts.shape[0]
+        full_ids, full_log_probs = pad_rollout_topk(ids, log_probs, prompt_length=prompt_length)
+        complete = torch.ones(full_ids.shape[0], dtype=torch.bool)
+        complete[prompt_length - 1 : prompt_length - 1 + ids.shape[0]] = response_complete
+        ids_list.append(full_ids)
+        log_probs_list.append(full_log_probs)
+        complete_list.append(complete)
+    data["rollout_topk_ids"] = torch.nested.as_nested_tensor(ids_list, layout=torch.jagged)
+    data["rollout_topk_log_probs"] = torch.nested.as_nested_tensor(log_probs_list, layout=torch.jagged)
+    data["rollout_support_complete"] = torch.nested.as_nested_tensor(complete_list, layout=torch.jagged)
+    return data
+
+
 class _TopKLogProbsFromLogits(torch.autograd.Function):
     """log_softmax(logits).gather(ids) with a bounded fp32 workspace in forward and backward.
 

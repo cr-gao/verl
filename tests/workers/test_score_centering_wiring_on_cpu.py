@@ -62,3 +62,26 @@ def test_prepare_model_outputs_keeps_logits_intact_for_score_centering(use_remov
         FSDPEngineWithLMHead.prepare_model_outputs(engine, output, output_args, micro_batch, logits_processor)
 
     assert mock_logprobs.call_args.kwargs.get("inplace_backward", True) is not score_centering
+
+
+def test_update_actor_lays_out_raw_topk_heads_before_training(monkeypatch):
+    from types import SimpleNamespace
+
+    from verl.workers import engine_workers
+
+    seen = {}
+
+    def fake_layout(data):
+        seen["data"] = data
+        return data
+
+    monkeypatch.setattr(engine_workers, "layout_rollout_topk", fake_layout)
+    worker = SimpleNamespace(
+        profiler=None,
+        enable_routing_replay=False,
+        actor=SimpleNamespace(train_mini_batch=lambda data: None),
+    )
+    data = TensorDict({"prompts": torch.zeros(1, 2, dtype=torch.int64)}, batch_size=[1])
+
+    assert engine_workers.ActorRolloutRefWorker.update_actor(worker, data) is None
+    assert seen["data"] is data
