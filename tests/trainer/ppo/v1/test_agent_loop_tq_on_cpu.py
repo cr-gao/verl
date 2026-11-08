@@ -108,10 +108,34 @@ async def test_run_agent_loop_sets_sink_for_the_session_and_resets_it(monkeypatc
 
     monkeypatch.setattr(AgentLoopWorker, "_run_agent_loop", parent)
 
-    await _worker_tq()._run_agent_loop({}, {"validate": False}, agent_name="single_turn_agent", uid="u0", session_id=2)
+    await _worker_tq()._run_agent_loop(
+        {"topk_log_probs": 2}, {"validate": False}, agent_name="single_turn_agent", uid="u0", session_id=2
+    )
 
     assert seen["sink"] == {"partition_id": "train", "key": "u0_2_0"}
     assert TQ_SINK.get() is None
+
+
+@pytest.mark.asyncio
+async def test_run_agent_loop_binds_no_sink_when_no_heads_are_requested(monkeypatch):
+    seen = {}
+    cleared = []
+
+    async def parent(self, sampling_params, trajectory, *, agent_name, trace=True, **kwargs):
+        seen["sink"] = TQ_SINK.get()
+        raise RuntimeError("boom")
+
+    async def clear(*, keys, partition_id):
+        cleared.append(keys)
+
+    monkeypatch.setattr(AgentLoopWorker, "_run_agent_loop", parent)
+    monkeypatch.setattr(agent_loop_tq_module.tq, "async_kv_clear", clear)
+
+    with pytest.raises(RuntimeError):
+        await _worker_tq()._run_agent_loop({}, {"validate": False}, agent_name="x", uid="u0", session_id=0)
+
+    assert seen["sink"] is None
+    assert cleared == []
 
 
 @pytest.mark.asyncio
@@ -128,7 +152,9 @@ async def test_run_agent_loop_clears_its_key_when_the_session_raises(monkeypatch
     monkeypatch.setattr(agent_loop_tq_module.tq, "async_kv_clear", clear)
 
     with pytest.raises(RuntimeError):
-        await _worker_tq()._run_agent_loop({}, {"validate": True}, agent_name="x", uid="u0", session_id=0)
+        await _worker_tq()._run_agent_loop(
+            {"topk_log_probs": 2}, {"validate": True}, agent_name="x", uid="u0", session_id=0
+        )
 
     assert cleared == [(["u0_0_0"], "val")]
 
@@ -139,6 +165,15 @@ async def test_postprocess_strips_marker_and_emits_no_topk_columns(monkeypatch):
 
     assert "rollout_topk_ids" not in fields.keys() and "response_topk_ids" not in fields.keys()
     assert "tq_fields" not in fields["extra_fields"][0]
+
+
+@pytest.mark.asyncio
+async def test_postprocess_rejects_marker_on_multi_turn_session(monkeypatch):
+    output = _output({"tq_fields": FIELDS})
+    output.num_turns = 4
+
+    with pytest.raises(ValueError, match="single-turn"):
+        await _postprocess(monkeypatch, _DummyWorker(topk_log_probs=2), output, False)
 
 
 @pytest.mark.asyncio

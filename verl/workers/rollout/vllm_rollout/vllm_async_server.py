@@ -624,6 +624,7 @@ class vLLMHttpServer:
                 mm_processor_kwargs=mm_processor_kwargs,
                 priority=priority,
                 session_id=session_id,
+                tq_sink=tq_sink,
             )
 
         prompt_ids = normalize_token_ids(prompt_ids)
@@ -871,8 +872,10 @@ class vLLMHttpServer:
         mm_processor_kwargs: Optional[dict[str, Any]] = None,
         priority: int = 0,
         session_id: Optional[str] = None,
+        tq_sink: Optional[dict] = None,
     ) -> TokenOutput:
-        """Run prefill locally, then decode on a selected peer."""
+        """Run prefill locally, then decode on a selected peer. The decode peer produces the
+        sampler heads, so it is the one that receives the sink."""
         decode_peer = self._select_decode_peer()
         connector = (self._disaggregation_kv_transfer_config or {}).get("kv_connector", "")
         is_mooncake = connector == "MooncakeConnector"
@@ -927,6 +930,7 @@ class vLLMHttpServer:
             priority=priority,
             kv_transfer_params=decode_kv_params,
             session_id=session_id,
+            tq_sink=tq_sink,
         )
 
     @RLInsightLogger.trace_state_decorator(

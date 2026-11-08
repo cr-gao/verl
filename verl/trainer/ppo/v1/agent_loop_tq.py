@@ -111,7 +111,11 @@ class AgentLoopWorkerTQ(AgentLoopWorker):
             task.add_done_callback(self.background_tasks.discard)
 
     async def _run_agent_loop(self, sampling_params, trajectory, *, agent_name, trace=True, **kwargs):
-        # The rollout server writes producer-final fields under this session's key while the
+        if not sampling_params.get("topk_log_probs"):
+            return await super()._run_agent_loop(
+                sampling_params, trajectory, agent_name=agent_name, trace=trace, **kwargs
+            )
+        # The rollout server writes the sampler heads under this session's key while the
         # session is still running, so a failed session must take that key down with it.
         partition_id = "val" if trajectory["validate"] else "train"
         key = f"{kwargs['uid']}_{kwargs['session_id']}_0"
@@ -183,6 +187,8 @@ class AgentLoopWorkerTQ(AgentLoopWorker):
         direct_fields = [output.extra_fields.pop("tq_fields", None) for output in outputs]
         if any(direct_fields) and len(outputs) > 1:
             raise ValueError("fields written directly to TransferQueue require a single output per session")
+        if direct_fields[0] and outputs[0].num_turns > 2:
+            raise ValueError("rollout.topk_log_probs supports the single-turn agent loop only.")
 
         await self._compute_score(outputs, kwargs=kwargs)
 

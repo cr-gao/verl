@@ -31,6 +31,10 @@ def test_generate_hands_topk_heads_to_the_direct_write_helper():
     assert 'extra_fields["response_topk_ids"]' not in source
 
 
-def test_pd_prefill_does_not_forward_the_sink():
-    prefill_call = inspect.getsource(vLLMHttpServer._pd_dispatch).split("prefill_out = await self.generate(")[1]
-    assert "tq_sink" not in prefill_call.split(")")[0]
+def test_pd_forwards_the_sink_to_the_decode_leg_only():
+    source = inspect.getsource(vLLMHttpServer._pd_dispatch)
+    prefill_call = source.split("prefill_out = await self.generate(")[1].split("\n        )")[0]
+    decode_call = source.split("return await decode_peer.generate.remote(")[1].split("\n        )")[0]
+    assert "tq_sink" not in prefill_call
+    assert "tq_sink=tq_sink" in decode_call
+    assert "tq_sink" in inspect.signature(vLLMHttpServer._pd_dispatch).parameters
