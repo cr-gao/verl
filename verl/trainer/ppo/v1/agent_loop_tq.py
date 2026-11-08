@@ -33,6 +33,7 @@ from verl.experimental.agent_loop import (
 )
 from verl.utils.ray_utils import auto_await
 from verl.utils.tensordict_utils import list_of_dict_to_tensordict
+from verl.workers.rollout.tq_direct_write import TQ_SINK
 
 logger = logging.getLogger(__name__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
@@ -109,6 +110,22 @@ class AgentLoopWorkerTQ(AgentLoopWorker):
             self.background_tasks.add(task)
             task.add_done_callback(self.background_tasks.discard)
 
+    async def _run_agent_loop(self, sampling_params, trajectory, *, agent_name, trace=True, **kwargs):
+        # The rollout server writes producer-final fields under this session's key while the
+        # session is still running, so a failed session must take that key down with it.
+        partition_id = "val" if trajectory["validate"] else "train"
+        key = f"{kwargs['uid']}_{kwargs['session_id']}_0"
+        token = TQ_SINK.set({"partition_id": partition_id, "key": key})
+        try:
+            return await super()._run_agent_loop(
+                sampling_params, trajectory, agent_name=agent_name, trace=trace, **kwargs
+            )
+        except Exception:
+            await tq.async_kv_clear(keys=[key], partition_id=partition_id)
+            raise
+        finally:
+            TQ_SINK.reset(token)
+
     async def _run_prompt(self, prompt: dict, sampling_params: dict, trajectory: dict, trace: bool = False) -> None:
         """Spawn multiple agent loops in parallel according to rollout.n or rollout.val_kwargs.n."""
         uid, partition_id = prompt["uid"], "train" if not trajectory["validate"] else "val"
@@ -160,7 +177,14 @@ class AgentLoopWorkerTQ(AgentLoopWorker):
         outputs = output if isinstance(output, list) else [output]
         if not outputs:
             logger.warning(f"Empty output for prompt {uid}_{session_id}")
+            await tq.async_kv_clear(keys=[f"{uid}_{session_id}_0"], partition_id="val" if validate else "train")
             return
+
+        # Fields the rollout server already wrote under this session's key; only the first
+        # output of a session has a key the server could have targeted.
+        direct_fields = [output.extra_fields.pop("tq_fields", None) for output in outputs]
+        if any(direct_fields) and len(outputs) > 1:
+            raise ValueError("fields written directly to TransferQueue require a single output per session")
 
         await self._compute_score(outputs, kwargs=kwargs)
 
