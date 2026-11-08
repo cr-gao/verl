@@ -86,3 +86,30 @@ async def test_put_direct_fields_append_concatenates_existing_rows(monkeypatch):
     _, _, stored = calls["put"][0]
     assert stored["response_topk_ids"][0].tolist() == [[1, 2], [3, 4]]
     assert stored["response_topk_log_probs"][0].tolist() == [[-1.0, -1.0], [-2.0, -2.0]]
+
+
+@pytest.mark.asyncio
+async def test_emit_direct_fields_writes_and_marks_when_sink_present(monkeypatch):
+    calls = _capture(monkeypatch)
+    ids = np.zeros((2, 2), dtype=np.int32)
+    complete = np.array([True, False])
+    extra = {}
+
+    await mod.emit_direct_fields(SINK, extra, {"response_topk_ids": ids, "response_support_complete": complete})
+
+    assert extra == {"tq_fields": ["response_topk_ids", "response_support_complete"]}
+    keys, partition_id, stored = calls["put"][0]
+    assert keys == ["u1_0_0"] and partition_id == "train"
+    assert stored["response_support_complete"][0].tolist() == [True, False]
+
+
+@pytest.mark.asyncio
+async def test_emit_direct_fields_keeps_arrays_inline_without_sink(monkeypatch):
+    calls = _capture(monkeypatch)
+    ids = np.zeros((2, 2), dtype=np.int32)
+    extra = {}
+
+    await mod.emit_direct_fields(None, extra, {"response_topk_ids": ids})
+
+    assert extra["response_topk_ids"] is ids and "tq_fields" not in extra
+    assert calls["put"] == [] and calls["init"] == 0

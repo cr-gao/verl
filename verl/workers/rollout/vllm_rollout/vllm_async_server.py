@@ -56,6 +56,7 @@ from verl.utils.tokenizer import normalize_token_ids
 from verl.utils.tracking import RLInsightLogger
 from verl.workers.config import HFModelConfig, RolloutConfig
 from verl.workers.rollout.replica import RolloutMode, RolloutReplica, TokenOutput
+from verl.workers.rollout.tq_direct_write import emit_direct_fields
 from verl.workers.rollout.utils import (
     extract_response_topk_logprobs_with_coverage,
     get_max_position_embeddings,
@@ -602,12 +603,15 @@ class vLLMHttpServer:
         priority: int = 0,
         kv_transfer_params: Optional[dict] = None,
         session_id: Optional[str] = None,
+        tq_sink: Optional[dict] = None,
     ) -> TokenOutput:
         """Generate sequence with token-in-token-out.
 
         Args:
             kv_transfer_params: vLLM KV-transfer payload for PD requests.
             session_id: Sticky caller id; turns of one session go to the same DP engine.
+            tq_sink: TransferQueue partition and key of the sample; sampler top-k heads are
+                written there instead of being returned.
         """
         if self._disaggregation_role == "prefill" and self._pd_decode_peers and kv_transfer_params is None:
             return await self._pd_dispatch(
@@ -759,18 +763,22 @@ class vLLMHttpServer:
         log_probs = None
         if sampling_params.logprobs:
             # indexing FlatLogprobs per position would rebuild a k+1 dict per token
-            (
-                log_probs,
-                extra_fields["response_topk_ids"],
-                extra_fields["response_topk_log_probs"],
-                extra_fields["response_support_complete"],
-            ) = extract_response_topk_logprobs_with_coverage(
+            log_probs, topk_ids, topk_log_probs, support_complete = extract_response_topk_logprobs_with_coverage(
                 final_res.outputs[0].logprobs,
                 sampling_params.logprobs,
                 vocab_size=self.engine.model_config.get_vocab_size(),
             )
+            await emit_direct_fields(
+                tq_sink,
+                extra_fields,
+                {
+                    "response_topk_ids": topk_ids,
+                    "response_topk_log_probs": topk_log_probs,
+                    "response_support_complete": support_complete,
+                },
+            )
             truncated = sampling_params.top_p < 1 or sampling_params.top_k > 0 or sampling_params.min_p > 0
-            if truncated and not extra_fields["response_support_complete"].all():
+            if truncated and not support_complete.all():
                 # Use the effective request after defaults, hooks and vLLM canonicalization.
                 # Repeated requests with the same settings need only one diagnostic.
                 signature = (

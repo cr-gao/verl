@@ -54,3 +54,16 @@ async def put_direct_fields(sink: dict, fields: dict[str, np.ndarray | torch.Ten
         keys=[sink["key"]], partition_id=sink["partition_id"], fields=list_of_dict_to_tensordict([tensors])
     )
     return names
+
+
+async def emit_direct_fields(
+    sink: dict | None, extra_fields: dict, fields: dict[str, np.ndarray | torch.Tensor]
+) -> None:
+    """Hand ``fields`` to the sink and leave only their names in ``extra_fields``.
+
+    Without a sink the arrays themselves go into ``extra_fields``.
+    """
+    if sink is None:
+        extra_fields.update(fields)
+        return
+    extra_fields["tq_fields"] = await put_direct_fields(sink, fields)
