@@ -33,7 +33,7 @@ from verl.experimental.agent_loop import (
 )
 from verl.utils.ray_utils import auto_await
 from verl.utils.tensordict_utils import list_of_dict_to_tensordict
-from verl.workers.rollout.tq_direct_write import TQ_SINK
+from verl.workers.rollout.tq_direct_write import direct_write_sink
 
 logger = logging.getLogger(__name__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
@@ -115,16 +115,14 @@ class AgentLoopWorkerTQ(AgentLoopWorker):
         # session is still running, so a failed session must take that key down with it.
         partition_id = "val" if trajectory["validate"] else "train"
         key = f"{kwargs['uid']}_{kwargs['session_id']}_0"
-        token = TQ_SINK.set({"partition_id": partition_id, "key": key})
-        try:
-            return await super()._run_agent_loop(
-                sampling_params, trajectory, agent_name=agent_name, trace=trace, **kwargs
-            )
-        except Exception:
-            await tq.async_kv_clear(keys=[key], partition_id=partition_id)
-            raise
-        finally:
-            TQ_SINK.reset(token)
+        with direct_write_sink(partition_id, key):
+            try:
+                return await super()._run_agent_loop(
+                    sampling_params, trajectory, agent_name=agent_name, trace=trace, **kwargs
+                )
+            except Exception:
+                await tq.async_kv_clear(keys=[key], partition_id=partition_id)
+                raise
 
     async def _run_prompt(self, prompt: dict, sampling_params: dict, trajectory: dict, trace: bool = False) -> None:
         """Spawn multiple agent loops in parallel according to rollout.n or rollout.val_kwargs.n."""

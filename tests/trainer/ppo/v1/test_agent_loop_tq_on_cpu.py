@@ -92,6 +92,13 @@ def _worker_tq():
     return _WorkerTQ.__new__(_WorkerTQ)
 
 
+def test_agent_loop_worker_tq_actor_class_is_serializable():
+    # Ray exports the modified actor class by value, so every global its methods reach must pickle.
+    import ray.cloudpickle as cloudpickle
+
+    cloudpickle.dumps(_WorkerTQ)
+
+
 @pytest.mark.asyncio
 async def test_run_agent_loop_sets_sink_for_the_session_and_resets_it(monkeypatch):
     seen = {}

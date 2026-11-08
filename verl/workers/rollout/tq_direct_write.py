@@ -18,6 +18,7 @@ that are final on the server side are written under that key here, so they never
 back through the agent loop.
 """
 
+from contextlib import contextmanager
 from contextvars import ContextVar
 
 import numpy as np
@@ -29,6 +30,16 @@ from verl.utils.transferqueue_utils import tq
 TQ_SINK: ContextVar[dict | None] = ContextVar("tq_sink", default=None)
 
 _TQ_READY = False
+
+
+@contextmanager
+def direct_write_sink(partition_id: str, key: str):
+    """Make ``(partition_id, key)`` the sink for every server call inside the block."""
+    token = TQ_SINK.set({"partition_id": partition_id, "key": key})
+    try:
+        yield
+    finally:
+        TQ_SINK.reset(token)
 
 
 async def put_direct_fields(sink: dict, fields: dict[str, np.ndarray | torch.Tensor]) -> list[str]:
