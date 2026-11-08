@@ -34,6 +34,7 @@ from verl.utils.rollout_trace import rollout_trace_op
 from verl.utils.tracking import RLInsightLogger
 from verl.workers.rollout.replica import RolloutReplica, TokenOutput, get_rollout_replica_class
 from verl.workers.rollout.router import GlobalRequestLoadBalancer  # noqa: F401
+from verl.workers.rollout.tq_direct_write import TQ_SINK
 from verl.workers.rollout.utils import update_prometheus_config
 
 logger = logging.getLogger(__file__)
@@ -147,6 +148,8 @@ class LLMServerClient:
             priority_kwargs = (
                 {"priority": priority} if priority != 0 and self.config.actor_rollout_ref.rollout.name == "vllm" else {}
             )
+            tq_sink = TQ_SINK.get()
+            sink_kwargs = {"tq_sink": tq_sink} if tq_sink is not None else {}
             output: TokenOutput = await server.generate.remote(
                 request_id=self._vllm_request_id(request_id),  # use new request_id for each turn
                 prompt_ids=prompt_ids,
@@ -155,6 +158,7 @@ class LLMServerClient:
                 video_data=video_data,
                 **multimodal_kwargs,
                 **priority_kwargs,
+                **sink_kwargs,
                 session_id=request_id,
                 **kwargs,
             )
@@ -286,19 +290,29 @@ class FullyAsyncLLMServerClient(LLMServerClient):
         # must carry it forward explicitly or the consumer sees 0. Take the first
         # (initial-prompt) prefill's hit count, matching single-prefill semantics.
         num_cached_tokens = None
+        tq_sink = TQ_SINK.get()
 
         while True:
-            # 1. generate tokens
-            output = await super().generate(
-                request_id=request_id,
-                prompt_ids=prompt_ids + final_output.token_ids,
-                sampling_params=sampling_params,
-                image_data=image_data,
-                video_data=video_data,
-                audio_data=audio_data,
-                mm_processor_kwargs=mm_processor_kwargs,
-                **kwargs,
-            )
+            # 1. generate tokens. Once a segment reached the sink, later segments append to it.
+            sink_token = None
+            if tq_sink is not None and "tq_fields" in final_output.extra_fields:
+                sink_token = TQ_SINK.set({**tq_sink, "append": True})
+            try:
+                output = await super().generate(
+                    request_id=request_id,
+                    prompt_ids=prompt_ids + final_output.token_ids,
+                    sampling_params=sampling_params,
+                    image_data=image_data,
+                    video_data=video_data,
+                    audio_data=audio_data,
+                    mm_processor_kwargs=mm_processor_kwargs,
+                    **kwargs,
+                )
+            finally:
+                if sink_token is not None:
+                    TQ_SINK.reset(sink_token)
+            if "tq_fields" in output.extra_fields:
+                final_output.extra_fields["tq_fields"] = output.extra_fields["tq_fields"]
 
             # 2. merge output into final_output
             final_output.token_ids.extend(output.token_ids)
@@ -315,23 +329,6 @@ class FullyAsyncLLMServerClient(LLMServerClient):
                     )
             if output.num_preempted is not None:
                 final_output.num_preempted += output.num_preempted
-            # sampler top-k heads for score centering, one row per newly generated token
-            for key in ("response_topk_ids", "response_topk_log_probs"):
-                if key in output.extra_fields:
-                    previous = final_output.extra_fields.get(key)
-                    final_output.extra_fields[key] = (
-                        output.extra_fields[key]
-                        if previous is None
-                        else np.concatenate([previous, output.extra_fields[key]])
-                    )
-            if "response_topk_ids" in output.extra_fields:
-                current = output.extra_fields.get("response_support_complete")
-                if current is None:
-                    current = np.zeros(len(output.extra_fields["response_topk_ids"]), dtype=np.bool_)
-                previous = final_output.extra_fields.get("response_support_complete")
-                if previous is None:
-                    previous = np.zeros(len(final_output.token_ids) - len(output.token_ids), dtype=np.bool_)
-                final_output.extra_fields["response_support_complete"] = np.concatenate([previous, current])
             final_output.stop_reason = output.stop_reason
 
             # carry the initial prefill's prefix-cache hit count forward

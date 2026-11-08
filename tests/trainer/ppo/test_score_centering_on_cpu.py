@@ -410,13 +410,16 @@ def test_extract_matches_vllm_dict_logprobs():
     assert log_probs.tolist() == [[np.float32(v).item() for _, _, v in row] for row in head]
 
 
-async def _generate_with_segments(monkeypatch, segments):
+async def _generate_with_segments(monkeypatch, segments, sink=None):
     from verl.workers.rollout import llm_server
     from verl.workers.rollout.llm_server import FullyAsyncLLMServerClient
+    from verl.workers.rollout.tq_direct_write import TQ_SINK
 
     pending = iter(segments)
+    sinks_seen = []
 
     async def fake_generate(self, request_id, *, prompt_ids, **kwargs):
+        sinks_seen.append(TQ_SINK.get())
         return next(pending)
 
     async def no_wait(_delay, *args, **kwargs):
@@ -426,35 +429,48 @@ async def _generate_with_segments(monkeypatch, segments):
     monkeypatch.setattr(llm_server.LLMServerClient, "generate", fake_generate)
     monkeypatch.setattr(llm_server.asyncio, "sleep", no_wait)
     client = FullyAsyncLLMServerClient(config=SimpleNamespace(), load_balancer_handle=None)
-    return await client.generate(request_id="req-0", prompt_ids=[1, 2, 3], sampling_params={})
+    token = TQ_SINK.set(sink)
+    try:
+        output = await client.generate(request_id="req-0", prompt_ids=[1, 2, 3], sampling_params={})
+    finally:
+        TQ_SINK.reset(token)
+    return output, sinks_seen
+
+
+_TQ_FIELDS = ["response_topk_ids", "response_topk_log_probs", "response_support_complete"]
+_SINK = {"partition_id": "train", "key": "u_0_0"}
+
+
+def _marked_segments():
+    from verl.workers.rollout.replica import TokenOutput
+
+    return [
+        TokenOutput(token_ids=[], stop_reason="aborted"),
+        TokenOutput(token_ids=[101, 102], stop_reason="aborted", extra_fields={"tq_fields": _TQ_FIELDS}),
+        TokenOutput(token_ids=[103], stop_reason="completed", extra_fields={"tq_fields": _TQ_FIELDS}),
+    ]
 
 
 @pytest.mark.asyncio
-async def test_fully_async_client_concatenates_rollout_topk_across_resumes(monkeypatch):
-    from verl.workers.rollout.replica import TokenOutput
-
-    def head(base, n):
-        return {
-            "response_topk_ids": np.arange(base, base + 2 * n, dtype=np.int32).reshape(n, 2),
-            "response_topk_log_probs": np.full((n, 2), -float(base), dtype=np.float32),
-        }
-
-    segments = [
-        TokenOutput(token_ids=[101, 102], stop_reason="aborted", extra_fields=head(10, 2)),
-        TokenOutput(token_ids=[103], stop_reason="completed", extra_fields=head(20, 1)),
-    ]
-    output = await _generate_with_segments(monkeypatch, segments)
+async def test_fully_async_client_appends_only_after_a_marked_segment(monkeypatch):
+    output, sinks_seen = await _generate_with_segments(monkeypatch, _marked_segments(), sink=_SINK)
+    assert sinks_seen == [_SINK, _SINK, {**_SINK, "append": True}]
     assert output.token_ids == [101, 102, 103]
-    assert output.extra_fields["response_topk_ids"].tolist() == [[10, 11], [12, 13], [20, 21]]
-    assert output.extra_fields["response_topk_log_probs"].tolist() == [[-10, -10], [-10, -10], [-20, -20]]
-    assert output.extra_fields["response_topk_ids"].dtype == np.int32
+    assert output.extra_fields["tq_fields"] == _TQ_FIELDS
+    assert "response_topk_ids" not in output.extra_fields
+
+
+@pytest.mark.asyncio
+async def test_fully_async_client_without_sink_never_sets_append(monkeypatch):
+    _, sinks_seen = await _generate_with_segments(monkeypatch, _marked_segments())
+    assert sinks_seen == [None, None, None]
 
 
 @pytest.mark.asyncio
 async def test_fully_async_client_without_rollout_topk_stays_unchanged(monkeypatch):
     from verl.workers.rollout.replica import TokenOutput
 
-    output = await _generate_with_segments(monkeypatch, [TokenOutput(token_ids=[101], stop_reason="completed")])
+    output, _ = await _generate_with_segments(monkeypatch, [TokenOutput(token_ids=[101], stop_reason="completed")])
     assert "response_topk_ids" not in output.extra_fields
 
 
