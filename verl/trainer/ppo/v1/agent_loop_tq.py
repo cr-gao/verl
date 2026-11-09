@@ -111,6 +111,7 @@ class AgentLoopWorkerTQ(AgentLoopWorker):
             task.add_done_callback(self.background_tasks.discard)
 
     async def _run_agent_loop(self, sampling_params, trajectory, *, agent_name, trace=True, **kwargs):
+        """Run one session, with its TransferQueue key bound as the sink when top-k heads are requested."""
         if not sampling_params.get("topk_log_probs"):
             return await super()._run_agent_loop(
                 sampling_params, trajectory, agent_name=agent_name, trace=trace, **kwargs
